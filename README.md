@@ -16,13 +16,15 @@ capability* — the browser an agent can actually use well.
 | Stealth approach | *remove* automation tells from a stock binary | *don't create them* — **be a real headful Chrome** |
 | Strongest mode | stealth-patched launch | **`AB_CONNECT` → your own running Chrome** (identical fingerprint) |
 | Agent's view of a page | HTML / DOM dump | **accessibility tree + `[ref]`**, act returns a **settle-diff** |
-| Network control | route/block/mock | ✅ `network_requests` + `route_block` |
-| Session reuse | storage state | ✅ `storage_save` / `storage_load` (cookies + localStorage) |
-| Serving | MCP | **MCP only** (no bundled agent) |
+| Tool surface | ~60 tools | **54 tools** (near-complete parity) |
+| Network / cookies / storage | ✅ | ✅ blocking, offline, api_request, cookies, local/session storage |
+| Serving | stdio + HTTP/SSE | **stdio + HTTP/SSE** (`AB_HTTP`) |
+| Footprint | ~79 MB node_modules, ~182 MB RSS | **4.3 MB binary, ~6 MB RSS** |
 | License | — | **Apache-2.0** |
 
 Same lineage (an external driver, not a Chromium fork), but a different stealth
-philosophy, a Rust hot path, and an accessibility-first agent interface.
+philosophy, a Rust hot path (≈30× lighter, ≈100× faster startup, ~2-3× per-op),
+and an accessibility-first agent interface — while matching the tool surface.
 
 ## Why
 
@@ -80,27 +82,32 @@ browser.
 - [x] `ab-cdp` — multiplexed CDP client (flatten sessions, event stream)
 - [x] `ab-browser` — Chrome launcher, stealth layer, `navigate` / `evaluate` /
       `snapshot` / `screenshot` + act (`click` / `type` / `press` by ref)
-- [x] `ab-mcp` — rmcp stdio server exposing **24** `browser_*` tools
+- [x] `ab-mcp` — rmcp server (stdio + HTTP/SSE) exposing **54** `browser_*` tools
 - [x] "be a real browser" stealth: headful + real profile + no patching; passes
-      **bot.sannysoft.com with 0 failures** with zero page patching
+      **bot.sannysoft.com** and **rebrowser-bot-detector.net** with 0 detections
 - [x] `AB_CONNECT` — attach to your own running Chrome (identical fingerprint)
-- [x] post-action **settle-diff** (act tools return the accessibility-tree delta)
-- [x] network log + URL blocking, cookie/localStorage session save/load
-- [x] dialogs auto-accepted so automation never hangs
-- [ ] file upload / drag / streamable-HTTP transport
+- [x] act by snapshot **ref OR CSS selector**; post-action **settle-diff**
+- [x] near-complete feature parity with mcp-patchright (network, cookies, web
+      storage, iframes, file upload, drag, api requests, console, …)
 
-## Tools (24)
+## Tools (54)
 
-**Read/see:** `navigate` · `snapshot` · `read` (markdown) · `get_html` ·
-`screenshot` · `pdf` · `pages` · `tabs`
-**Act:** `click` · `type` · `press` · `hover` · `select` · `fill_form` · `back` ·
-`wait` · `evaluate` · `resize` · `close_page`
-**Network/session:** `network_requests` · `route_block` · `storage_save` ·
-`storage_load`
-**Stealth:** `fingerprint_check`
+**Read/see:** `navigate` · `new_page` · `snapshot` · `read` (markdown) ·
+`get_html` · `get_text` · `find` · `screenshot` · `pdf` · `pages` · `tabs` ·
+`switch_page` · `status`
+**Act (by ref or CSS selector):** `click` · `type` · `press` · `hover` ·
+`select` · `fill_form` · `drag` · `file_upload` · `back` · `wait` · `resize` ·
+`evaluate` · `run_code` · `iframe_click` · `iframe_fill` · `close_page` · `close`
+**Network:** `network_requests` · `route_block` · `route_clear` ·
+`network_state_set` (offline) · `api_request`
+**Cookies:** `cookie_list` · `cookie_get` · `cookie_set` · `cookie_delete` ·
+`cookie_clear`
+**Web storage:** `localstorage_{list,get,set,delete,clear}` ·
+`sessionstorage_{list,get,set,delete,clear}` · `storage_save` · `storage_load`
+**Diagnostics:** `console_messages` · `fingerprint_check`
 
-Act tools wait for the page to settle and return a **diff of the accessibility
-tree** — the cheap "did it work" signal.
+Act tools accept a snapshot `ref` **or** a CSS `selector`, wait for the page to
+settle, and return a **diff of the accessibility tree** — the "did it work" signal.
 
 ## Run as an MCP server
 
