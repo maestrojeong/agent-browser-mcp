@@ -132,6 +132,27 @@ pub const STEALTH_INIT_SCRIPT: &str = r#"
     }
   } catch (_) {}
 
+  // speechSynthesis voices come from the OS TTS engine, which a headless/server
+  // Chrome lacks → getVoices() is empty, a bot signal. Present a plausible set.
+  try {
+    const ss = window.speechSynthesis;
+    if (ss && ss.getVoices().length === 0) {
+      const raw = [
+        ['Samantha', 'en-US', true, true], ['Alex', 'en-US', true, false],
+        ['Daniel', 'en-GB', true, false], ['Karen', 'en-AU', true, false],
+        ['Moira', 'en-IE', true, false], ['Rishi', 'en-IN', true, false],
+        ['Google US English', 'en-US', false, false],
+        ['Google UK English Male', 'en-GB', false, false],
+      ];
+      const voices = raw.map(([name, lang, local, def]) => ({
+        voiceURI: name, name, lang, localService: local, default: def,
+      }));
+      const gv = mark(function getVoices() { return voices.slice(); }, 'getVoices');
+      Object.defineProperty(ss, 'getVoices', { value: gv, configurable: true });
+      setTimeout(() => { try { ss.dispatchEvent(new Event('voiceschanged')); } catch (_) {} }, 0);
+    }
+  } catch (_) {}
+
   // Headless reports outerWidth/outerHeight === 0. Mirror the inner size (plus
   // typical chrome) so the window looks like a real one.
   try {
