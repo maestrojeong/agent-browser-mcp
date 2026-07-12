@@ -7,8 +7,10 @@
 pub mod snapshot;
 pub mod stealth;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ab_cdp::CdpClient;
@@ -17,6 +19,45 @@ use tokio::process::{Child, Command};
 use tracing::{debug, info};
 
 pub use snapshot::Snapshot;
+
+/// One logged network request/response.
+#[derive(Debug, Clone)]
+pub struct NetEntry {
+    pub url: String,
+    pub method: String,
+    pub resource_type: String,
+    pub status: Option<i64>,
+    pub failed: bool,
+}
+
+#[derive(Default)]
+struct NetState {
+    entries: Vec<NetEntry>,
+    index: HashMap<String, usize>,
+}
+
+/// A live, growing log of a page's network activity (from CDP Network events).
+#[derive(Clone, Default)]
+pub struct NetworkLog {
+    state: Arc<Mutex<NetState>>,
+}
+
+impl NetworkLog {
+    /// The most recent `limit` entries, optionally filtered by URL substring.
+    pub fn recent(&self, limit: usize, filter: Option<&str>) -> Vec<NetEntry> {
+        let st = self.state.lock().unwrap();
+        let mut v: Vec<NetEntry> = st
+            .entries
+            .iter()
+            .filter(|e| filter.is_none_or(|f| e.url.contains(f)))
+            .cloned()
+            .collect();
+        if v.len() > limit {
+            v = v.split_off(v.len() - limit);
+        }
+        v
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
@@ -698,6 +739,84 @@ impl Page {
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
+    }
+
+    /// Enable the Network domain and start collecting request/response events
+    /// into a `NetworkLog`. Network.enable is not page-observable (unlike
+    /// Runtime.enable), so this is safe for stealth.
+    pub async fn enable_network_log(&self) -> Result<NetworkLog> {
+        self.client
+            .send_on(&self.session_id, "Network.enable", json!({}))
+            .await?;
+        let log = NetworkLog::default();
+        let mut rx = self.client.events();
+        let sid = self.session_id.clone();
+        let l = log.clone();
+        tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if ev.session_id.as_deref() != Some(&sid) {
+                    continue;
+                }
+                let p = &ev.params;
+                let rid = p.get("requestId").and_then(Value::as_str);
+                match ev.method.as_str() {
+                    "Network.requestWillBeSent" => {
+                        if let (Some(id), Some(req)) = (rid, p.get("request")) {
+                            let entry = NetEntry {
+                                url: req.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+                                method: req.get("method").and_then(Value::as_str).unwrap_or("").to_string(),
+                                resource_type: p.get("type").and_then(Value::as_str).unwrap_or("").to_string(),
+                                status: None,
+                                failed: false,
+                            };
+                            let mut st = l.state.lock().unwrap();
+                            let idx = st.entries.len();
+                            st.entries.push(entry);
+                            st.index.insert(id.to_string(), idx);
+                        }
+                    }
+                    "Network.responseReceived" => {
+                        if let Some(id) = rid {
+                            let status = p.get("response").and_then(|r| r.get("status")).and_then(Value::as_i64);
+                            let mut st = l.state.lock().unwrap();
+                            if let Some(&idx) = st.index.get(id) {
+                                if let Some(e) = st.entries.get_mut(idx) {
+                                    e.status = status;
+                                }
+                            }
+                        }
+                    }
+                    "Network.loadingFailed" => {
+                        if let Some(id) = rid {
+                            let mut st = l.state.lock().unwrap();
+                            if let Some(&idx) = st.index.get(id) {
+                                if let Some(e) = st.entries.get_mut(idx) {
+                                    e.failed = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(log)
+    }
+
+    /// Block requests whose URL matches any of the given wildcard patterns
+    /// (e.g. "*.png", "*doubleclick*"). Uses Network.setBlockedURLs.
+    pub async fn set_blocked_urls(&self, patterns: &[String]) -> Result<()> {
+        self.client
+            .send_on(&self.session_id, "Network.enable", json!({}))
+            .await?;
+        self.client
+            .send_on(
+                &self.session_id,
+                "Network.setBlockedURLs",
+                json!({ "urls": patterns }),
+            )
+            .await?;
+        Ok(())
     }
 }
 

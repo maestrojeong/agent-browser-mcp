@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ab_browser::{Browser, LaunchOptions, Page};
+use ab_browser::{Browser, LaunchOptions, NetworkLog, Page};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServiceExt};
@@ -30,6 +30,7 @@ struct PageEntry {
     page: Page,
     refs: HashMap<String, i64>,
     last_text: String,
+    netlog: Option<NetworkLog>,
 }
 
 /// Order-insensitive line diff: what appeared / disappeared between snapshots.
@@ -147,6 +148,24 @@ struct WaitArgs {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NetArgs {
+    page: String,
+    /// Only include requests whose URL contains this substring.
+    #[serde(default)]
+    filter: Option<String>,
+    /// Max entries to return (default 100).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BlockArgs {
+    page: String,
+    /// URL wildcard patterns to block (e.g. "*.png", "*doubleclick*").
+    patterns: Vec<String>,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -217,6 +236,11 @@ impl BrowserServer {
         st.pages.get(id).map(|e| e.last_text.clone()).unwrap_or_default()
     }
 
+    async fn netlog_of(&self, id: &str) -> Option<NetworkLog> {
+        let st = self.state.lock().await;
+        st.pages.get(id).and_then(|e| e.netlog.clone())
+    }
+
     /// After an action: wait for settle, re-snapshot, diff vs the previous
     /// snapshot, persist the new one, and return the diff for the agent.
     async fn settle_diff(&self, id: &str, page: &Page) -> Result<String, McpError> {
@@ -242,13 +266,16 @@ impl BrowserServer {
             let b = make_browser().await.map_err(fail)?;
             st.browser = Some(b);
         }
+        // Blank page first so the network log captures the navigation itself.
         let page = st
             .browser
             .as_ref()
             .unwrap()
-            .new_page(&a.url)
+            .new_page("about:blank")
             .await
             .map_err(fail)?;
+        let netlog = page.enable_network_log().await.ok();
+        page.navigate(&a.url).await.map_err(fail)?;
         let snap = page.snapshot().await.map_err(fail)?;
         st.next += 1;
         let id = format!("p{}", st.next);
@@ -258,6 +285,7 @@ impl BrowserServer {
                 page,
                 refs: snap.refs.clone(),
                 last_text: snap.text.clone(),
+                netlog,
             },
         );
         Ok(ok(format!("page {id}\nurl {}\n\n{}", a.url, snap.text)))
@@ -314,6 +342,51 @@ impl BrowserServer {
         page.press(&a.key).await.map_err(fail)?;
         let diff = self.settle_diff(&a.page, &page).await?;
         Ok(ok(format!("pressed {} on {}\n\n{}", a.key, a.page, diff)))
+    }
+
+    /// List recent network requests for a page (URL, method, status).
+    #[tool(description = "List recent network requests (url, method, status)")]
+    async fn browser_network_requests(
+        &self,
+        Parameters(a): Parameters<NetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let log = self
+            .netlog_of(&a.page)
+            .await
+            .ok_or_else(|| fail(format!("no network log for '{}'", a.page)))?;
+        let entries = log.recent(a.limit.unwrap_or(100), a.filter.as_deref());
+        if entries.is_empty() {
+            return Ok(ok("(no requests)".to_string()));
+        }
+        let mut out = String::new();
+        for e in &entries {
+            let status = if e.failed {
+                "FAIL".to_string()
+            } else {
+                e.status.map(|s| s.to_string()).unwrap_or_else(|| "…".into())
+            };
+            out.push_str(&format!(
+                "{:>4} {:<6} {:<10} {}\n",
+                status, e.method, e.resource_type, e.url
+            ));
+        }
+        Ok(ok(out))
+    }
+
+    /// Block requests matching URL wildcard patterns (ads, trackers, media).
+    #[tool(description = "Block requests by URL wildcard patterns (e.g. *.png, *doubleclick*)")]
+    async fn browser_route_block(
+        &self,
+        Parameters(a): Parameters<BlockArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.set_blocked_urls(&a.patterns).await.map_err(fail)?;
+        Ok(ok(format!(
+            "blocking {} pattern(s) on {}: {}",
+            a.patterns.len(),
+            a.page,
+            a.patterns.join(", ")
+        )))
     }
 
     /// Hover the pointer over an element by ref.
