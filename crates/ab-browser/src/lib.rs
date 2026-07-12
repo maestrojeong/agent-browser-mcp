@@ -818,6 +818,46 @@ impl Page {
             .await?;
         Ok(())
     }
+
+    /// All cookies (browser-wide), as the CDP cookie array.
+    pub async fn cookies(&self) -> Result<Value> {
+        let r = self
+            .client
+            .send_on(&self.session_id, "Network.getAllCookies", json!({}))
+            .await?;
+        Ok(r.get("cookies").cloned().unwrap_or_else(|| json!([])))
+    }
+
+    /// Restore cookies from a CDP cookie array.
+    pub async fn set_cookies(&self, cookies: &Value) -> Result<()> {
+        self.client
+            .send_on(&self.session_id, "Network.enable", json!({}))
+            .await?;
+        self.client
+            .send_on(
+                &self.session_id,
+                "Network.setCookies",
+                json!({ "cookies": cookies }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// localStorage of the current origin as a `{ key: value }` object.
+    pub async fn local_storage(&self) -> Result<Value> {
+        self.evaluate("JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(localStorage))))")
+            .await
+    }
+
+    /// Restore localStorage for the current origin from a `{ key: value }` object.
+    pub async fn set_local_storage(&self, data: &Value) -> Result<()> {
+        let script = format!(
+            "(() => {{ const d = {}; for (const k in d) try {{ localStorage.setItem(k, d[k]); }} catch(_){{}} }})()",
+            serde_json::to_string(data).unwrap_or_else(|_| "{}".into())
+        );
+        self.evaluate(&script).await?;
+        Ok(())
+    }
 }
 
 /// Persistent per-user profile directory (aged profiles look human). Override

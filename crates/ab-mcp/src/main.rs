@@ -166,6 +166,13 @@ struct BlockArgs {
     patterns: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StorageArgs {
+    page: String,
+    /// File path to save to / load from (JSON: cookies + localStorage).
+    path: String,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -387,6 +394,41 @@ impl BrowserServer {
             a.page,
             a.patterns.join(", ")
         )))
+    }
+
+    /// Save cookies + localStorage of a page to a JSON file (session capture).
+    #[tool(description = "Save cookies + localStorage to a JSON file")]
+    async fn browser_storage_save(
+        &self,
+        Parameters(a): Parameters<StorageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let cookies = page.cookies().await.map_err(fail)?;
+        let local = page.local_storage().await.unwrap_or(serde_json::json!({}));
+        let blob = serde_json::json!({ "cookies": cookies, "localStorage": local });
+        tokio::fs::write(&a.path, serde_json::to_vec_pretty(&blob).unwrap_or_default())
+            .await
+            .map_err(fail)?;
+        let n = cookies.as_array().map(|c| c.len()).unwrap_or(0);
+        Ok(ok(format!("saved {n} cookies + localStorage to {}", a.path)))
+    }
+
+    /// Restore cookies + localStorage from a JSON file (re-auth a session).
+    #[tool(description = "Load cookies + localStorage from a JSON file")]
+    async fn browser_storage_load(
+        &self,
+        Parameters(a): Parameters<StorageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let raw = tokio::fs::read(&a.path).await.map_err(fail)?;
+        let blob: serde_json::Value = serde_json::from_slice(&raw).map_err(fail)?;
+        if let Some(cookies) = blob.get("cookies") {
+            page.set_cookies(cookies).await.map_err(fail)?;
+        }
+        if let Some(local) = blob.get("localStorage") {
+            let _ = page.set_local_storage(local).await;
+        }
+        Ok(ok(format!("loaded session from {} (reload the page to apply)", a.path)))
     }
 
     /// Hover the pointer over an element by ref.
