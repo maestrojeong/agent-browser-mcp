@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bot Detector</title>
+<style>
+  body { font: 14px ui-monospace, monospace; background:#0b0e14; color:#e6ebf3; padding:24px; }
+  h1 { font-size:16px; color:#5eead4; }
+  table { border-collapse:collapse; margin-top:12px; }
+  td { padding:4px 12px; border-bottom:1px solid #232c3d; }
+  .pass { color:#4ade80; } .fail { color:#f87171; }
+  #score { margin-top:16px; font-size:18px; }
+</style>
+</head>
+<body>
+<h1>agent-browser bot detector</h1>
+<p>A single page whose only job is to detect browser automation. The browser and
+this detector co-evolve: add a check, close the leak, repeat.</p>
+<table id="t"></table>
+<div id="score">running…</div>
+<script>
+(async () => {
+  const checks = [];
+  const info = [];
+  const add = (name, pass, detail) => checks.push({ name, pass: !!pass, detail: String(detail) });
+  const addInfo = (name, detail) => info.push({ name, detail: String(detail) });
+
+  // 1. navigator.webdriver must not be true
+  add("navigator.webdriver", navigator.webdriver !== true, navigator.webdriver);
+
+  // 2. plugins present
+  add("navigator.plugins", navigator.plugins.length > 0, navigator.plugins.length);
+
+  // 3. mimeTypes present
+  add("navigator.mimeTypes", navigator.mimeTypes.length > 0, navigator.mimeTypes.length);
+
+  // 4. languages present
+  add("navigator.languages", (navigator.languages || []).length > 0, (navigator.languages || []).join(","));
+
+  // 5. window.chrome present
+  add("window.chrome", !!window.chrome, !!window.chrome);
+
+  // 6. UA has no "headless" token
+  add("userAgent !headless", !/headless/i.test(navigator.userAgent), navigator.userAgent.slice(0, 60));
+
+  // WebGL renderer (INFORMATIONAL, unscored): a software rasterizer
+  // (SwiftShader / llvmpipe) is a headless tell, but it is also the legitimate
+  // renderer on GPU-less CI, so scoring it would be environment-dependent.
+  // Spoofing the renderer is a tracked growth item.
+  let renderer = "n/a";
+  try {
+    const gl = document.createElement("canvas").getContext("webgl");
+    const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+    renderer = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "no-ext";
+  } catch (e) { renderer = "err"; }
+  addInfo("webgl renderer (unscored)", renderer);
+
+  // 8. Permissions consistency: query('notifications') must match Notification.permission
+  //    (headless Chrome classically reports 'denied' while permission is 'default')
+  let permOk = true, permDetail = "n/a";
+  try {
+    const q = await navigator.permissions.query({ name: "notifications" });
+    permDetail = q.state + " / " + Notification.permission;
+    permOk = !(Notification.permission === "default" && q.state === "denied");
+  } catch (e) { permDetail = "err"; }
+  add("permissions consistent", permOk, permDetail);
+
+  // 9. Screen/viewport plausibility (headless reports outerWidth === 0)
+  add("viewport plausible", window.outerWidth > 0 && screen.width >= window.innerWidth,
+      "outer " + window.outerWidth + "x" + window.outerHeight + ", screen " + screen.width + "x" + screen.height);
+
+  // INFORMATIONAL: CDP/DevTools console-serialization probe.
+  //   Reliable CDP self-detection from pure JS does not exist — Chrome eagerly
+  //   builds console previews, so this yields false positives in any browser.
+  //   agent-browser's real defense is architectural: it never enables the
+  //   Runtime/Console domains. Shown for transparency, not scored.
+  let cdp = false;
+  try {
+    const bait = new Error("bait");
+    Object.defineProperty(bait, "message", { get() { cdp = true; return "bait"; } });
+    console.debug(bait);
+  } catch (e) {}
+  addInfo("cdp console probe (unscored)", cdp ? "getter fired (inconclusive)" : "quiet");
+
+  const passed = checks.filter((c) => c.pass).length;
+  const result = { passed, total: checks.length, checks, info, ua: navigator.userAgent };
+
+  // Render
+  const t = document.getElementById("t");
+  t.innerHTML = checks.map((c) =>
+    `<tr><td class="${c.pass ? "pass" : "fail"}">${c.pass ? "✓" : "✗"}</td><td>${c.name}</td><td>${c.detail}</td></tr>`
+  ).join("") + info.map((c) =>
+    `<tr><td>·</td><td style="opacity:.6">${c.name}</td><td style="opacity:.6">${c.detail}</td></tr>`
+  ).join("");
+  document.getElementById("score").textContent =
+    `score: ${passed}/${checks.length}` + (passed === checks.length ? "  — looks human ✓" : "  — automation detected ✗");
+
+  // Expose for programmatic scraping by the bench runner.
+  window.__DETECT__ = result;
+  window.__DETECT_READY__ = true;
+})();
+</script>
+</body>
+</html>

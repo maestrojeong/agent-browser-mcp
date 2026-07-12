@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Build
+        run: cargo build --release --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The stealth benchmark is a hard gate: the browser must pass the bot
+      # detector it ships with. A new detector check that fails here must be
+      # met by a stealth fix in the same PR — that is the co-evolution loop.
+      - name: Stealth benchmark
+        env:
+          AB_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: node bench/run.mjs target/release/agent-browser

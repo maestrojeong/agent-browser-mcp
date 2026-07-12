@@ -73,14 +73,54 @@ Set a specific browser with `AB_CHROME=/path/to/chrome`.
 cargo run -p ab-browser --example smoke -- https://example.com
 ```
 
-## Layout
+## Stealth benchmark (browser + detector co-evolve)
+
+The repo ships its own **bot detector** — a single page whose only job is to
+detect automation — plus a runner that drives agent-browser against it and
+grades the result. They grow together: a new detector check that fails must be
+met by a stealth fix **in the same commit**. CI gates on it.
+
+```bash
+node bench/run.mjs target/release/agent-browser
+```
+
+```
+✓  navigator.webdriver      undefined
+✓  navigator.plugins        5
+✓  navigator.languages      ...
+✓  userAgent !headless      Mozilla/5.0 ...
+✓  viewport plausible       outer 1280x787, screen 1280x800
+score: 8/8 — looks human ✓
+```
+
+Scored checks are environment-independent; GPU/renderer and CDP-console probes
+are shown as **informational** (they vary by machine or are inherently
+unreliable from JS). Growth TODO: WebGL renderer spoofing.
+
+## Layout (monorepo)
+
+Everything lives in one repo on purpose — the browser and the detector that
+tests it must move in lockstep.
 
 ```
 crates/
   ab-cdp/      # CDP transport: one WS, flatten sessions, command/event routing
-  ab-browser/  # Browser + Page: launch, stealth, snapshot, screenshot, evaluate
-  ab-mcp/      # MCP server (rmcp) — the only serving surface  [WIP]
+  ab-browser/  # Browser + Page: launch, stealth, snapshot, act, screenshot
+  ab-mcp/      # MCP server (rmcp) — the only serving surface
+bench/
+  detector.html  # the bot-detection page (also hostable as a public site)
+  run.mjs        # drives agent-browser against it; exits nonzero on any leak
+.github/workflows/ci.yml   # build + test + stealth-benchmark gate
 ```
+
+## Distribution
+
+- **Primary:** ship the MCP server binary. `cargo build --release` →
+  `target/release/agent-browser`, or grab it from GitHub Releases (planned:
+  cross-compiled binaries via CI).
+- **Detector:** stays in this monorepo. It is valuable first as a **CI
+  regression gate**; publishing it as a public benchmark page (GitHub Pages
+  from `bench/detector.html`) is an optional, zero-infra follow-up.
 
 ## License
 

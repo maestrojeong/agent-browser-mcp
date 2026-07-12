@@ -86,6 +86,35 @@ pub const STEALTH_INIT_SCRIPT: &str = r#"
     }
   } catch (_) {}
 
+  // Headless reports outerWidth/outerHeight === 0. Mirror the inner size (plus
+  // typical chrome) so the window looks like a real one.
+  try {
+    if (window.outerWidth === 0) {
+      Object.defineProperty(window, 'outerWidth', {
+        get: () => window.innerWidth,
+        configurable: true,
+      });
+    }
+    if (window.outerHeight === 0) {
+      Object.defineProperty(window, 'outerHeight', {
+        get: () => window.innerHeight + 74,
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // Headless screen defaults to 800x600, which can be smaller than the window
+  // (an implausible combination). Normalize the screen to at least the window.
+  try {
+    const sw = Math.max(screen.width | 0, window.innerWidth | 0, 1280);
+    const sh = Math.max(screen.height | 0, window.innerHeight | 0, 800);
+    const defs = { width: sw, height: sh, availWidth: sw, availHeight: sh - 40 };
+    for (const k in defs) {
+      const v = defs[k];
+      Object.defineProperty(screen, k, { get: () => v, configurable: true });
+    }
+  } catch (_) {}
+
   // Permissions.query for 'notifications' should mirror Notification.permission.
   try {
     const orig = window.navigator.permissions && window.navigator.permissions.query;
