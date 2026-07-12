@@ -93,6 +93,14 @@ node bench/run.mjs target/release/agent-browser
 score: 8/8 — looks human ✓
 ```
 
+It also passes the real-world **[bot.sannysoft.com](https://bot.sannysoft.com)**
+detector with **0 failures** — every WebDriver / HeadlessChrome / PhantomJS /
+Selenium / CDP-devtools probe comes back clean:
+
+```bash
+node bench/external.mjs target/release/agent-browser   # informational, needs network
+```
+
 Scored checks are environment-independent (WebGL renderer is spoofed to a
 hardware GPU when the real one is software, so it scores consistently on
 GPU-less CI). The CDP-console probe stays **informational** — reliable CDP
