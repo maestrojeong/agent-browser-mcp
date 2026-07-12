@@ -556,26 +556,54 @@ impl Page {
             .and_then(|r| r.get("object").and_then(|o| o.get("objectId")).and_then(Value::as_str).map(String::from)))
     }
 
-    /// Click a node by ref. Prefers a real synthesized mouse click at the
-    /// element center; falls back to a DOM `.click()` when there is no box.
+    /// Move the pointer to (x, y) along a short, slightly-curved, multi-step
+    /// path instead of teleporting — behavioral realism (a bot jumps; a human
+    /// glides). No-op-safe: falls through if events fail.
+    async fn human_move_to(&self, x: f64, y: f64) -> Result<()> {
+        // Start a little away from the target so there is actual motion.
+        let sx = x - 60.0 + rand_f64(30.0);
+        let sy = y - 40.0 + rand_f64(20.0);
+        let steps = 6 + (rand_u64(0, 3) as usize);
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            // ease-in-out + small perpendicular wobble
+            let ease = t * t * (3.0 - 2.0 * t);
+            let wobble = (t * std::f64::consts::PI).sin() * rand_f64(6.0);
+            let px = sx + (x - sx) * ease;
+            let py = sy + (y - sy) * ease + wobble;
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseMoved", "x": px, "y": py }),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(rand_u64(6, 20))).await;
+        }
+        Ok(())
+    }
+
+    /// Click a node by ref: glide the pointer to it, then press/release with a
+    /// human-like dwell. Falls back to a DOM `.click()` when there is no box.
     pub async fn click(&self, backend: i64) -> Result<()> {
         if let Some((x, y)) = self.node_center(backend).await? {
-            for kind in ["mousePressed", "mouseReleased"] {
-                self.client
-                    .send_on(
-                        &self.session_id,
-                        "Input.dispatchMouseEvent",
-                        json!({
-                            "type": kind,
-                            "x": x,
-                            "y": y,
-                            "button": "left",
-                            "buttons": 1,
-                            "clickCount": 1,
-                        }),
-                    )
-                    .await?;
-            }
+            let _ = self.human_move_to(x, y).await;
+            tokio::time::sleep(Duration::from_millis(rand_u64(20, 70))).await;
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(rand_u64(40, 110))).await;
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
+                )
+                .await?;
             return Ok(());
         }
         // Fallback: JS click via objectId.
@@ -595,15 +623,15 @@ impl Page {
         Err(BrowserError::Protocol("element not clickable".into()))
     }
 
-    /// Focus a node and type text via real key/insert events.
-    /// When `clear` is set, existing content is selected and replaced.
+    /// Focus a node and type text with per-character key events at human-like
+    /// random intervals. When `clear` is set, existing content is selected and
+    /// replaced first.
     pub async fn type_text(&self, backend: i64, text: &str, clear: bool) -> Result<()> {
         self.client
             .send_on(&self.session_id, "DOM.focus", json!({ "backendNodeId": backend }))
             .await?;
         if clear {
             if let Some(obj) = self.resolve_object(backend).await? {
-                // Select all existing text so insertText replaces it.
                 self.client
                     .send_on(
                         &self.session_id,
@@ -616,14 +644,35 @@ impl Page {
                     )
                     .await?;
             }
+            // Delete the selection so typed keys replace it.
+            for kind in ["keyDown", "keyUp"] {
+                self.client
+                    .send_on(
+                        &self.session_id,
+                        "Input.dispatchKeyEvent",
+                        json!({ "type": kind, "key": "Delete", "code": "Delete", "windowsVirtualKeyCode": 46 }),
+                    )
+                    .await?;
+            }
         }
-        self.client
-            .send_on(
-                &self.session_id,
-                "Input.insertText",
-                json!({ "text": text }),
-            )
-            .await?;
+        for ch in text.chars() {
+            let s = ch.to_string();
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchKeyEvent",
+                    json!({ "type": "keyDown", "text": s, "key": s, "unmodifiedText": s }),
+                )
+                .await?;
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchKeyEvent",
+                    json!({ "type": "keyUp", "key": s }),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(rand_u64(30, 90))).await;
+        }
         Ok(())
     }
 
@@ -1004,6 +1053,31 @@ fn default_profile_dir() -> Result<PathBuf> {
         .ok_or_else(|| BrowserError::Launch("cannot resolve profile dir; set AB_PROFILE".into()))?;
     std::fs::create_dir_all(&base).map_err(|e| BrowserError::Launch(e.to_string()))?;
     Ok(base)
+}
+
+/// Cheap non-crypto randomness for input jitter (no extra dependency). Seeded
+/// from the clock, xorshift-mixed — plenty for humanizing timings/paths.
+fn rand_u64(min: u64, max: u64) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = n.wrapping_mul(2654435761).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 13;
+    x ^= x << 7;
+    x ^= x >> 17;
+    if max <= min {
+        min
+    } else {
+        min + (x % (max - min + 1))
+    }
+}
+
+/// Random offset in [-spread, +spread].
+fn rand_f64(spread: f64) -> f64 {
+    let r = rand_u64(0, 10_000) as f64 / 10_000.0; // 0..1
+    (r * 2.0 - 1.0) * spread
 }
 
 fn detect_chrome() -> Option<PathBuf> {
