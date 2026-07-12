@@ -141,6 +141,19 @@ impl Browser {
             None => default_profile_dir()?,
         };
 
+        // A persistent profile keeps a stale `DevToolsActivePort` from the
+        // previous run; if we read it before the new Chrome rewrites it we get
+        // the wrong port ("no webSocketDebuggerUrl"). Remove it first. Also drop
+        // Singleton* lock files left by an unclean (SIGKILL) exit.
+        for f in [
+            "DevToolsActivePort",
+            "SingletonLock",
+            "SingletonSocket",
+            "SingletonCookie",
+        ] {
+            let _ = std::fs::remove_file(data_dir.join(f));
+        }
+
         let mut args: Vec<String> = vec![
             format!("--remote-debugging-port={}", opts.port),
             format!("--user-data-dir={}", data_dir.display()),

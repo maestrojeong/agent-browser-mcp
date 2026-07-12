@@ -122,6 +122,17 @@ Register with an MCP client (e.g. Claude Code / Cursor):
 
 Set a specific browser with `AB_CHROME=/path/to/chrome`.
 
+### Transports
+
+- **stdio** (default) — the config above.
+- **Streamable HTTP / SSE** — set `AB_HTTP=<port>` (or `host:port`). The server
+  listens on `http://<host>:<port>/mcp`; each client session gets its own
+  browser. Point an HTTP MCP client at that URL:
+
+  ```bash
+  AB_HTTP=8931 agent-browser        # -> http://127.0.0.1:8931/mcp
+  ```
+
 ## Try the core directly (no MCP)
 
 ```bash

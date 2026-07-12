@@ -734,8 +734,40 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // AB_HTTP=<port|host:port> → serve over streamable HTTP; otherwise stdio.
+    if let Ok(addr) = std::env::var("AB_HTTP") {
+        return serve_http(&addr).await;
+    }
+
     info!("agent-browser MCP server starting on stdio");
     let service = BrowserServer::new().serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
+    Ok(())
+}
+
+/// Serve over the MCP Streamable HTTP transport (endpoint: `/mcp`). Each client
+/// session gets its own BrowserServer (and thus its own browser).
+async fn serve_http(addr: &str) -> anyhow::Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let bind = if addr.contains(':') {
+        addr.to_string()
+    } else {
+        format!("127.0.0.1:{addr}")
+    };
+
+    let service: StreamableHttpService<BrowserServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            || Ok(BrowserServer::new()),
+            Default::default(),
+            StreamableHttpServerConfig::default(),
+        );
+
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    info!("agent-browser MCP server on http://{bind}/mcp (streamable HTTP)");
+    axum::serve(listener, router).await?;
     Ok(())
 }
