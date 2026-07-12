@@ -990,6 +990,115 @@ impl Page {
         Ok(())
     }
 
+    /// Clear all blocked-URL patterns.
+    pub async fn clear_blocked_urls(&self) -> Result<()> {
+        self.client
+            .send_on(&self.session_id, "Network.setBlockedURLs", json!({ "urls": [] }))
+            .await?;
+        Ok(())
+    }
+
+    /// Toggle offline emulation.
+    pub async fn set_offline(&self, offline: bool) -> Result<()> {
+        self.client
+            .send_on(&self.session_id, "Network.enable", json!({}))
+            .await?;
+        self.client
+            .send_on(
+                &self.session_id,
+                "Network.emulateNetworkConditions",
+                json!({
+                    "offline": offline,
+                    "latency": 0,
+                    "downloadThroughput": -1,
+                    "uploadThroughput": -1,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Make an HTTP request from the page context (uses the page's cookies/session).
+    /// Returns `{ status, ok, body }` (body truncated). Runs in the main world so
+    /// same-origin credentials apply.
+    pub async fn api_request(
+        &self,
+        url: &str,
+        method: &str,
+        headers: &Value,
+        body: Option<&str>,
+    ) -> Result<Value> {
+        let opts = json!({
+            "method": method,
+            "headers": headers,
+            "body": body,
+            "credentials": "include",
+        });
+        let js = format!(
+            r#"(async () => {{
+              try {{
+                const o = {opts};
+                if (o.body == null) delete o.body;
+                const r = await fetch({url}, o);
+                const text = await r.text();
+                return JSON.stringify({{ status: r.status, ok: r.ok, body: text.slice(0, 40000) }});
+              }} catch (e) {{ return JSON.stringify({{ error: String(e) }}); }}
+            }})()"#,
+            opts = opts,
+            url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into()),
+        );
+        self.evaluate_main(&js).await
+    }
+
+    /// Set files on a file `<input>` by backend node id.
+    pub async fn upload_files(&self, backend: i64, paths: &[String]) -> Result<()> {
+        self.client
+            .send_on(
+                &self.session_id,
+                "DOM.setFileInputFiles",
+                json!({ "files": paths, "backendNodeId": backend }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Drag from one element to another (press, glide, release).
+    pub async fn drag(&self, from: i64, to: i64) -> Result<()> {
+        let (Some((fx, fy)), Some((tx, ty))) =
+            (self.node_center(from).await?, self.node_center(to).await?)
+        else {
+            return Err(BrowserError::Protocol("drag source/target has no box".into()));
+        };
+        self.human_move_to(fx, fy).await?;
+        self.client
+            .send_on(
+                &self.session_id,
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mousePressed", "x": fx, "y": fy, "button": "left", "buttons": 1, "clickCount": 1 }),
+            )
+            .await?;
+        // Glide toward the target while holding the button.
+        for i in 1..=8 {
+            let t = i as f64 / 8.0;
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseMoved", "x": fx + (tx - fx) * t, "y": fy + (ty - fy) * t, "button": "left", "buttons": 1 }),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(rand_u64(8, 22))).await;
+        }
+        self.client
+            .send_on(
+                &self.session_id,
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "buttons": 0, "clickCount": 1 }),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// All cookies (browser-wide), as the CDP cookie array.
     pub async fn cookies(&self) -> Result<Value> {
         let r = self

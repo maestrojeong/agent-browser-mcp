@@ -282,6 +282,51 @@ struct StorageSetArgs {
     value: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct OfflineArgs {
+    page: String,
+    /// true = simulate offline, false = back online.
+    offline: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ApiRequestArgs {
+    page: String,
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    /// Request headers as a JSON object.
+    #[serde(default)]
+    headers: Option<serde_json::Value>,
+    /// Request body (for POST/PUT).
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadArgs {
+    page: String,
+    #[serde(default, rename = "ref")]
+    ref_: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+    /// Absolute file paths to set on the file input.
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DragArgs {
+    page: String,
+    #[serde(default)]
+    source_ref: Option<String>,
+    #[serde(default)]
+    source_selector: Option<String>,
+    #[serde(default)]
+    target_ref: Option<String>,
+    #[serde(default)]
+    target_selector: Option<String>,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -583,6 +628,73 @@ impl BrowserServer {
             a.page,
             a.patterns.join(", ")
         )))
+    }
+
+    /// Clear all URL blocking rules.
+    #[tool(description = "Clear all request-blocking rules")]
+    async fn browser_route_clear(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.clear_blocked_urls().await.map_err(fail)?;
+        Ok(ok(format!("cleared blocking rules on {}", a.page)))
+    }
+
+    /// Toggle offline network emulation.
+    #[tool(description = "Set the page offline/online (network emulation)")]
+    async fn browser_network_state_set(
+        &self,
+        Parameters(a): Parameters<OfflineArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.set_offline(a.offline).await.map_err(fail)?;
+        Ok(ok(format!(
+            "{} on {}",
+            if a.offline { "offline" } else { "online" },
+            a.page
+        )))
+    }
+
+    /// Make an HTTP request from the page context (sends the page's cookies).
+    #[tool(description = "HTTP request from the page context (uses session cookies); returns status + body")]
+    async fn browser_api_request(
+        &self,
+        Parameters(a): Parameters<ApiRequestArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let headers = a.headers.unwrap_or_else(|| serde_json::json!({}));
+        let v = page
+            .api_request(&a.url, a.method.as_deref().unwrap_or("GET"), &headers, a.data.as_deref())
+            .await
+            .map_err(fail)?;
+        Ok(ok(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+    }
+
+    /// Set files on a file input (by ref or selector).
+    #[tool(description = "Upload files to a file input by ref/selector")]
+    async fn browser_file_upload(
+        &self,
+        Parameters(a): Parameters<UploadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let backend = self.resolve(&a.page, &a.ref_, &a.selector).await?;
+        let page = self.page_of(&a.page).await?;
+        page.upload_files(backend, &a.paths).await.map_err(fail)?;
+        Ok(ok(format!("set {} file(s) on {}", a.paths.len(), a.page)))
+    }
+
+    /// Drag from one element to another (by ref or selector).
+    #[tool(description = "Drag from source to target (each by ref or selector); returns settle-diff")]
+    async fn browser_drag(
+        &self,
+        Parameters(a): Parameters<DragArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let from = self.resolve(&a.page, &a.source_ref, &a.source_selector).await?;
+        let to = self.resolve(&a.page, &a.target_ref, &a.target_selector).await?;
+        let page = self.page_of(&a.page).await?;
+        page.drag(from, to).await.map_err(fail)?;
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("dragged on {}\n\n{}", a.page, diff)))
     }
 
     // ---- cookies (granular) ----
