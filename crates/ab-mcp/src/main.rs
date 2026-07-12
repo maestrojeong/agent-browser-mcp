@@ -123,6 +123,10 @@ struct EvalArgs {
     page: String,
     /// JavaScript expression evaluated in page context.
     expression: String,
+    /// Run in the page's main world (can read page-set `window` globals, but the
+    /// execution is observable/detectable). Default false = isolated world.
+    #[serde(default)]
+    main_world: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -514,14 +518,19 @@ impl BrowserServer {
         )))
     }
 
-    /// Run one-shot JavaScript in page context (no Runtime.enable).
-    #[tool(description = "Evaluate a JavaScript expression in page context")]
+    /// Run one-shot JavaScript. Isolated world by default (undetectable); pass
+    /// main_world=true to read page-set window globals.
+    #[tool(description = "Evaluate JS (isolated world by default; main_world=true for page globals)")]
     async fn browser_evaluate(
         &self,
         Parameters(a): Parameters<EvalArgs>,
     ) -> Result<CallToolResult, McpError> {
         let page = self.page_of(&a.page).await?;
-        let v = page.evaluate(&a.expression).await.map_err(fail)?;
+        let v = if a.main_world {
+            page.evaluate_main(&a.expression).await.map_err(fail)?
+        } else {
+            page.evaluate(&a.expression).await.map_err(fail)?
+        };
         Ok(ok(serde_json::to_string(&v).unwrap_or_else(|_| "null".into())))
     }
 

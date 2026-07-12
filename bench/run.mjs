@@ -56,9 +56,9 @@ if (!navResult.startsWith("page ")) {
 // Poll until the async checks have populated the global.
 let result = null;
 for (let i = 0; i < 30; i++) {
-  const ready = await callText("browser_evaluate", { page: "p1", expression: "window.__DETECT_READY__ === true" });
+  const ready = await callText("browser_evaluate", { page: "p1", expression: "window.__DETECT_READY__ === true", main_world: true });
   if (ready.trim() === "true") {
-    const json = await callText("browser_evaluate", { page: "p1", expression: "JSON.stringify(window.__DETECT__)" });
+    const json = await callText("browser_evaluate", { page: "p1", expression: "JSON.stringify(window.__DETECT__)", main_world: true });
     result = JSON.parse(JSON.parse(json)); // evaluate returns a JSON string value
     break;
   }

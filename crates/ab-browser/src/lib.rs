@@ -339,19 +339,66 @@ impl Page {
         }
     }
 
-    /// One-shot JS evaluation in page context. No Runtime.enable (stealth).
+    /// One-shot JS evaluation. Defaults to an **isolated world** so the
+    /// execution isn't observable by the page (avoids the `mainWorldExecution`
+    /// automation tell). Never enables the Runtime domain. Note: isolated-world
+    /// code shares the DOM but cannot see JS globals the page set on `window` —
+    /// use `evaluate_main` for that.
     pub async fn evaluate(&self, expression: &str) -> Result<Value> {
+        self.eval_raw(expression, true).await
+    }
+
+    /// Evaluate in the page's **main world** (can read page-set `window`
+    /// globals, but the execution is observable). Prefer `evaluate`.
+    pub async fn evaluate_main(&self, expression: &str) -> Result<Value> {
+        self.eval_raw(expression, false).await
+    }
+
+    async fn main_frame_id(&self) -> Result<String> {
+        let tree = self
+            .client
+            .send_on(&self.session_id, "Page.getFrameTree", json!({}))
+            .await?;
+        tree.get("frameTree")
+            .and_then(|t| t.get("frame"))
+            .and_then(|f| f.get("id"))
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| BrowserError::Protocol("no main frame id".into()))
+    }
+
+    async fn eval_raw(&self, expression: &str, isolated: bool) -> Result<Value> {
+        let mut params = json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": true,
+        });
+        if isolated {
+            // Create a fresh isolated world (valid after navigation) and target it.
+            // Fall back to the main world if the page domain isn't ready.
+            if let Ok(frame) = self.main_frame_id().await {
+                if let Ok(w) = self
+                    .client
+                    .send_on(
+                        &self.session_id,
+                        "Page.createIsolatedWorld",
+                        json!({
+                            "frameId": frame,
+                            "worldName": "ab_isolated",
+                            "grantUniveralAccess": false,
+                        }),
+                    )
+                    .await
+                {
+                    if let Some(ctx) = w.get("executionContextId").and_then(Value::as_i64) {
+                        params["contextId"] = json!(ctx);
+                    }
+                }
+            }
+        }
         let res = self
             .client
-            .send_on(
-                &self.session_id,
-                "Runtime.evaluate",
-                json!({
-                    "expression": expression,
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                }),
-            )
+            .send_on(&self.session_id, "Runtime.evaluate", params)
             .await?;
         if let Some(exc) = res.get("exceptionDetails") {
             return Err(BrowserError::Protocol(format!("JS exception: {exc}")));
@@ -845,8 +892,10 @@ impl Page {
 
     /// localStorage of the current origin as a `{ key: value }` object.
     pub async fn local_storage(&self) -> Result<Value> {
-        self.evaluate("JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(localStorage))))")
-            .await
+        self.evaluate_main(
+            "JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(localStorage))))",
+        )
+        .await
     }
 
     /// Restore localStorage for the current origin from a `{ key: value }` object.
@@ -855,7 +904,7 @@ impl Page {
             "(() => {{ const d = {}; for (const k in d) try {{ localStorage.setItem(k, d[k]); }} catch(_){{}} }})()",
             serde_json::to_string(data).unwrap_or_else(|_| "{}".into())
         );
-        self.evaluate(&script).await?;
+        self.evaluate_main(&script).await?;
         Ok(())
     }
 
