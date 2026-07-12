@@ -99,6 +99,30 @@ GPU-less CI). The CDP-console probe stays **informational** — reliable CDP
 self-detection from JS doesn't exist; agent-browser's defense is architectural
 (it never enables the Runtime/Console domains).
 
+## How the stealth works
+
+The guiding rule is **stealth by omission**: the strongest CDP tell (enabling the
+`Runtime`/`Console` domains) is simply never sent. `Runtime.evaluate` works
+one-shot without `enable`; the accessibility tree needs only
+`Accessibility.enable`, which the page cannot observe. On top of that, a small
+pre-document script normalizes the residual signals a page can read:
+
+| Signal a site reads | Headless / automated tell | What agent-browser does |
+|---|---|---|
+| `navigator.webdriver` | `true` | force `undefined` |
+| `navigator.plugins` / `mimeTypes` | empty | plausible non-empty set |
+| `navigator.languages` | empty | fill if empty |
+| `window.chrome` | missing | shimmed |
+| User-Agent | contains `HeadlessChrome` | de-headlessed via CDP override |
+| `window.outerWidth/Height` | `0` | mirror inner size |
+| `screen.width/height` | `800×600` < window | normalized ≥ window |
+| WebGL `UNMASKED_RENDERER` | SwiftShader / llvmpipe | spoof a hardware GPU **only when software** |
+| `navigator.deviceMemory` | true RAM (e.g. 16) | clamp to ≤ 8 (as real Chrome does) |
+| hooked fn `.toString()` | reveals JS source | masked as `[native code]` |
+| CDP `Runtime.enable` | detectable | never sent (architectural) |
+
+Every row is guarded by the `bench/` detector so a regression turns CI red.
+
 ## Layout (monorepo)
 
 Everything lives in one repo on purpose — the browser and the detector that

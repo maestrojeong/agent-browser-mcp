@@ -111,6 +111,15 @@ pub const STEALTH_INIT_SCRIPT: &str = r#"
     }
   } catch (_) {}
 
+  // Real Chrome clamps navigator.deviceMemory to a max of 8 (privacy). Headless
+  // can report the true RAM (e.g. 16/32), which is itself a tell. Clamp to 8.
+  try {
+    if (typeof navigator.deviceMemory === 'number' && navigator.deviceMemory > 8) {
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
+      markProp(navigator, 'deviceMemory', 'get deviceMemory');
+    }
+  } catch (_) {}
+
   // window.chrome runtime shim (present in real Chrome, missing when driven).
   try {
     if (!window.chrome) {

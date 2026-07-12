@@ -64,6 +64,18 @@ this detector co-evolve: add a check, close the leak, repeat.</p>
   } catch (e) { permDetail = "err"; }
   add("permissions consistent", permOk, permDetail);
 
+  // 9a. hardwareConcurrency should be a plausible core count.
+  add("hardwareConcurrency", navigator.hardwareConcurrency > 0, navigator.hardwareConcurrency);
+
+  // 9b. deviceMemory present and realistic — real Chrome clamps it to <= 8,
+  //     so a larger value (true RAM) is a headless tell.
+  add("deviceMemory realistic",
+      navigator.deviceMemory !== undefined && navigator.deviceMemory <= 8,
+      navigator.deviceMemory);
+
+  // 9c. pdfViewerEnabled is true on real Chrome (false is a headless tell).
+  add("pdfViewerEnabled", navigator.pdfViewerEnabled === true, navigator.pdfViewerEnabled);
+
   // 9. Hooked functions must still look native under .toString() probing.
   //    webdriver getter and permissions.query are always patched by the browser.
   let leak = "";
