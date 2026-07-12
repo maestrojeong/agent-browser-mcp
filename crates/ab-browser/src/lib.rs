@@ -599,6 +599,108 @@ impl Page {
     }
 }
 
+/// More navigation / interaction primitives (parity with mature drivers).
+impl Page {
+    /// Hover the pointer over an element by ref (mouseMoved to its center).
+    pub async fn hover(&self, backend: i64) -> Result<()> {
+        if let Some((x, y)) = self.node_center(backend).await? {
+            self.client
+                .send_on(
+                    &self.session_id,
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": "mouseMoved", "x": x, "y": y }),
+                )
+                .await?;
+            Ok(())
+        } else {
+            Err(BrowserError::Protocol("element has no box to hover".into()))
+        }
+    }
+
+    /// Set the value of a <select> by ref and fire input/change events.
+    pub async fn select_option(&self, backend: i64, value: &str) -> Result<()> {
+        let obj = self
+            .resolve_object(backend)
+            .await?
+            .ok_or_else(|| BrowserError::Protocol("cannot resolve element".into()))?;
+        self.client
+            .send_on(
+                &self.session_id,
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": obj,
+                    "arguments": [{ "value": value }],
+                    "functionDeclaration":
+                        "function(v){ this.value = v; this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); }",
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Navigate back one entry in the tab's history and wait for load.
+    pub async fn go_back(&self) -> Result<()> {
+        let hist = self
+            .client
+            .send_on(&self.session_id, "Page.getNavigationHistory", json!({}))
+            .await?;
+        let idx = hist.get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
+        if idx <= 0 {
+            return Ok(());
+        }
+        let entries = hist.get("entries").and_then(Value::as_array);
+        if let Some(entry) = entries.and_then(|e| e.get((idx - 1) as usize)) {
+            if let Some(id) = entry.get("id").and_then(Value::as_i64) {
+                self.client
+                    .send_on(
+                        &self.session_id,
+                        "Page.navigateToHistoryEntry",
+                        json!({ "entryId": id }),
+                    )
+                    .await?;
+                let _ = self.wait_for_load().await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Poll until `text` appears in the page (or timeout). Returns whether found.
+    pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let expr = format!(
+            "(document.body ? document.body.innerText : '').includes({})",
+            serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
+        );
+        loop {
+            if self.evaluate(&expr).await?.as_bool().unwrap_or(false) {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    /// Poll until a CSS selector matches (or timeout). Returns whether found.
+    pub async fn wait_for_selector(&self, selector: &str, timeout_ms: u64) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let expr = format!(
+            "!!document.querySelector({})",
+            serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into())
+        );
+        loop {
+            if self.evaluate(&expr).await?.as_bool().unwrap_or(false) {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+}
+
 /// Persistent per-user profile directory (aged profiles look human). Override
 /// with `AB_PROFILE`. We deliberately avoid a throwaway temp dir.
 fn default_profile_dir() -> Result<PathBuf> {

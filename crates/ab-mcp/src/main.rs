@@ -124,6 +124,29 @@ struct EvalArgs {
     expression: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SelectArgs {
+    page: String,
+    #[serde(rename = "ref")]
+    ref_: String,
+    /// The option value to select.
+    value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WaitArgs {
+    page: String,
+    /// Wait until this text appears anywhere on the page.
+    #[serde(default)]
+    text: Option<String>,
+    /// Wait until this CSS selector matches.
+    #[serde(default)]
+    selector: Option<String>,
+    /// Timeout in milliseconds (default 10000).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -291,6 +314,67 @@ impl BrowserServer {
         page.press(&a.key).await.map_err(fail)?;
         let diff = self.settle_diff(&a.page, &page).await?;
         Ok(ok(format!("pressed {} on {}\n\n{}", a.key, a.page, diff)))
+    }
+
+    /// Hover the pointer over an element by ref.
+    #[tool(description = "Hover an element by ref; returns settle-diff")]
+    async fn browser_hover(
+        &self,
+        Parameters(a): Parameters<RefArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let backend = self.backend_of(&a.page, &a.ref_).await?;
+        let page = self.page_of(&a.page).await?;
+        page.hover(backend).await.map_err(fail)?;
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("hovered {} on {}\n\n{}", a.ref_, a.page, diff)))
+    }
+
+    /// Select an <option> in a dropdown by ref + value.
+    #[tool(description = "Select a dropdown option by ref and value; returns settle-diff")]
+    async fn browser_select(
+        &self,
+        Parameters(a): Parameters<SelectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let backend = self.backend_of(&a.page, &a.ref_).await?;
+        let page = self.page_of(&a.page).await?;
+        page.select_option(backend, &a.value).await.map_err(fail)?;
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("selected {:?} in {} on {}\n\n{}", a.value, a.ref_, a.page, diff)))
+    }
+
+    /// Navigate back one entry in the page's history.
+    #[tool(description = "Go back one history entry; returns settle-diff")]
+    async fn browser_back(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.go_back().await.map_err(fail)?;
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("went back on {}\n\n{}", a.page, diff)))
+    }
+
+    /// Wait until text appears or a selector matches (whichever is given).
+    #[tool(description = "Wait for text or a CSS selector to appear")]
+    async fn browser_wait(
+        &self,
+        Parameters(a): Parameters<WaitArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let ms = a.timeout_ms.unwrap_or(10_000);
+        let (found, what) = if let Some(t) = &a.text {
+            (page.wait_for_text(t, ms).await.map_err(fail)?, format!("text {t:?}"))
+        } else if let Some(s) = &a.selector {
+            (page.wait_for_selector(s, ms).await.map_err(fail)?, format!("selector {s:?}"))
+        } else {
+            return Err(fail("provide `text` or `selector`"));
+        };
+        Ok(ok(format!(
+            "{} {} on {}",
+            if found { "found" } else { "TIMEOUT waiting for" },
+            what,
+            a.page
+        )))
     }
 
     /// Run one-shot JavaScript in page context (no Runtime.enable).
