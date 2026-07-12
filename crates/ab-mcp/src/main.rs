@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ab_browser::{Browser, LaunchOptions, NetworkLog, Page};
+use ab_browser::{Browser, ConsoleLog, LaunchOptions, NetworkLog, Page};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServiceExt};
@@ -31,6 +31,7 @@ struct PageEntry {
     refs: HashMap<String, i64>,
     last_text: String,
     netlog: Option<NetworkLog>,
+    consolelog: Option<ConsoleLog>,
 }
 
 /// Order-insensitive line diff: what appeared / disappeared between snapshots.
@@ -315,6 +316,32 @@ struct UploadArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct IframeClickArgs {
+    page: String,
+    /// CSS selector for the <iframe> element.
+    frame_selector: String,
+    /// CSS selector for the element inside the iframe.
+    selector: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IframeFillArgs {
+    page: String,
+    frame_selector: String,
+    selector: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RunCodeArgs {
+    page: String,
+    /// JavaScript body. Receives `args` (your provided array) in scope.
+    script: String,
+    #[serde(default)]
+    args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DragArgs {
     page: String,
     #[serde(default)]
@@ -481,6 +508,7 @@ impl BrowserServer {
                 refs: snap.refs.clone(),
                 last_text: snap.text.clone(),
                 netlog,
+                consolelog: None,
             },
         );
         Ok((id, snap.text))
@@ -1055,6 +1083,108 @@ impl BrowserServer {
             "running: {running}\nmode: {mode}\nopen pages: {}",
             st.pages.len()
         )))
+    }
+
+    /// Get recent console messages for a page. NOTE: enables the Runtime CDP
+    /// domain on first use (a stealth tell) and captures messages from then on.
+    #[tool(description = "Get console messages (enables Runtime on first use — a stealth tradeoff)")]
+    async fn browser_console_messages(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        // Lazily enable + store the console log for this page.
+        let existing = {
+            let st = self.state.lock().await;
+            st.pages.get(&a.page).and_then(|e| e.consolelog.clone())
+        };
+        let log = match existing {
+            Some(l) => l,
+            None => {
+                let page = self.page_of(&a.page).await?;
+                let l = page.enable_console_log().await.map_err(fail)?;
+                let mut st = self.state.lock().await;
+                if let Some(e) = st.pages.get_mut(&a.page) {
+                    e.consolelog = Some(l.clone());
+                }
+                // Give a brief moment for buffered messages after enabling.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                l
+            }
+        };
+        let lines = log.recent(200);
+        Ok(ok(if lines.is_empty() {
+            "(no console messages captured yet — capture starts when this tool is first called)".to_string()
+        } else {
+            lines.join("\n")
+        }))
+    }
+
+    /// Click an element inside a same-origin iframe.
+    #[tool(description = "Click an element inside a same-origin iframe")]
+    async fn browser_iframe_click(
+        &self,
+        Parameters(a): Parameters<IframeClickArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.iframe_click(&a.frame_selector, &a.selector).await.map_err(fail)?;
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("iframe-clicked on {}\n\n{}", a.page, diff)))
+    }
+
+    /// Fill an input inside a same-origin iframe.
+    #[tool(description = "Fill an input inside a same-origin iframe")]
+    async fn browser_iframe_fill(
+        &self,
+        Parameters(a): Parameters<IframeFillArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.iframe_fill(&a.frame_selector, &a.selector, &a.value).await.map_err(fail)?;
+        Ok(ok(format!("iframe-filled on {}", a.page)))
+    }
+
+    /// Run arbitrary JavaScript with args (isolated world). Returns the result.
+    #[tool(description = "Run a JS body with an args array (isolated world); returns its result")]
+    async fn browser_run_code(
+        &self,
+        Parameters(a): Parameters<RunCodeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let args = a.args.unwrap_or_else(|| serde_json::json!([]));
+        let wrapped = format!(
+            "(function(args){{ {} }})({})",
+            a.script,
+            serde_json::to_string(&args).unwrap_or_else(|_| "[]".into())
+        );
+        let v = page.evaluate(&wrapped).await.map_err(fail)?;
+        Ok(ok(serde_json::to_string(&v).unwrap_or_else(|_| "null".into())))
+    }
+
+    /// Switch focus to a page (returns its current snapshot).
+    #[tool(description = "Switch to a page and return its snapshot")]
+    async fn browser_switch_page(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let snap = page.snapshot().await.map_err(fail)?;
+        self.store_snapshot(&a.page, snap.refs.clone(), snap.text.clone()).await;
+        Ok(ok(format!("page {}\n\n{}", a.page, snap.text)))
+    }
+
+    /// Close the browser and drop all pages.
+    #[tool(description = "Close the browser (all pages)")]
+    async fn browser_close(&self) -> Result<CallToolResult, McpError> {
+        let browser = {
+            let mut st = self.state.lock().await;
+            st.pages.clear();
+            st.browser.take()
+        };
+        if let Some(b) = browser {
+            b.close().await;
+            Ok(ok("browser closed".to_string()))
+        } else {
+            Ok(ok("(no browser running)".to_string()))
+        }
     }
 
     /// Save a full-page PNG screenshot to a temp file; returns its path.

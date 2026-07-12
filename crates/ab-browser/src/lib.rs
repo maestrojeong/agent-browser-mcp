@@ -42,6 +42,21 @@ pub struct NetworkLog {
     state: Arc<Mutex<NetState>>,
 }
 
+/// A live log of a page's console messages (needs Runtime.enable — a stealth
+/// tell, so only started on demand).
+#[derive(Clone, Default)]
+pub struct ConsoleLog {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl ConsoleLog {
+    pub fn recent(&self, limit: usize) -> Vec<String> {
+        let v = self.lines.lock().unwrap();
+        let start = v.len().saturating_sub(limit);
+        v[start..].to_vec()
+    }
+}
+
 impl NetworkLog {
     /// The most recent `limit` entries, optionally filtered by URL substring.
     pub fn recent(&self, limit: usize, filter: Option<&str>) -> Vec<NetEntry> {
@@ -771,6 +786,81 @@ impl Page {
             Ok(Some(false)) => self.wait_for_load().await.unwrap_or(()), // nav in flight
             _ => tokio::time::sleep(Duration::from_millis(350)).await, // no nav: DOM grace
         }
+    }
+
+    /// Click an element inside a same-origin iframe (main-world JS).
+    pub async fn iframe_click(&self, frame_selector: &str, selector: &str) -> Result<()> {
+        let js = format!(
+            r#"(() => {{ const f=document.querySelector({fs}); const d=f&&(f.contentDocument||(f.contentWindow&&f.contentWindow.document)); const el=d&&d.querySelector({s}); if(!el) throw new Error('iframe element not found'); el.click(); return true; }})()"#,
+            fs = serde_json::to_string(frame_selector).unwrap_or_else(|_| "\"\"".into()),
+            s = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+        );
+        self.evaluate_main(&js).await?;
+        Ok(())
+    }
+
+    /// Fill an input inside a same-origin iframe (main-world JS).
+    pub async fn iframe_fill(&self, frame_selector: &str, selector: &str, value: &str) -> Result<()> {
+        let js = format!(
+            r#"(() => {{ const f=document.querySelector({fs}); const d=f&&(f.contentDocument||(f.contentWindow&&f.contentWindow.document)); const el=d&&d.querySelector({s}); if(!el) throw new Error('iframe element not found'); el.focus(); el.value={v}; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return true; }})()"#,
+            fs = serde_json::to_string(frame_selector).unwrap_or_else(|_| "\"\"".into()),
+            s = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+            v = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+        );
+        self.evaluate_main(&js).await?;
+        Ok(())
+    }
+
+    /// Start capturing console messages. Enables the Runtime domain (a stealth
+    /// tell), so this is opt-in. Captures messages from now on.
+    pub async fn enable_console_log(&self) -> Result<ConsoleLog> {
+        self.client
+            .send_on(&self.session_id, "Runtime.enable", json!({}))
+            .await?;
+        let log = ConsoleLog::default();
+        let mut rx = self.client.events();
+        let sid = self.session_id.clone();
+        let l = log.clone();
+        tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if ev.session_id.as_deref() != Some(&sid) {
+                    continue;
+                }
+                match ev.method.as_str() {
+                    "Runtime.consoleAPICalled" => {
+                        let kind = ev.params.get("type").and_then(Value::as_str).unwrap_or("log");
+                        let args: Vec<String> = ev
+                            .params
+                            .get("args")
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .map(|x| {
+                                        x.get("value")
+                                            .map(|v| v.to_string())
+                                            .or_else(|| x.get("description").and_then(Value::as_str).map(String::from))
+                                            .unwrap_or_default()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        l.lines.lock().unwrap().push(format!("[{kind}] {}", args.join(" ")));
+                    }
+                    "Runtime.exceptionThrown" => {
+                        let txt = ev
+                            .params
+                            .get("exceptionDetails")
+                            .and_then(|e| e.get("exception"))
+                            .and_then(|e| e.get("description").or_else(|| e.get("value")))
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "exception".into());
+                        l.lines.lock().unwrap().push(format!("[error] {txt}"));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(log)
     }
 
     /// Focus an element by backend node id.
