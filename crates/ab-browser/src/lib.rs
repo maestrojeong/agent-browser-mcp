@@ -858,6 +858,37 @@ impl Page {
         self.evaluate(&script).await?;
         Ok(())
     }
+
+    /// Render the page to a PDF (bytes). Note: Chrome only supports printToPDF
+    /// in headless mode; in headful this returns a protocol error.
+    pub async fn pdf(&self) -> Result<Vec<u8>> {
+        let res = self
+            .client
+            .send_on(
+                &self.session_id,
+                "Page.printToPDF",
+                json!({ "printBackground": true }),
+            )
+            .await?;
+        let b64 = res
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BrowserError::Protocol("no pdf data".into()))?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| BrowserError::Protocol(e.to_string()))
+    }
+
+    /// Full serialized HTML of the current document.
+    pub async fn html(&self) -> Result<String> {
+        Ok(self
+            .evaluate("document.documentElement.outerHTML")
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string())
+    }
 }
 
 /// Persistent per-user profile directory (aged profiles look human). Override

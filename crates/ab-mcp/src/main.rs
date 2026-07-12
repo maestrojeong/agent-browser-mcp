@@ -173,6 +173,20 @@ struct StorageArgs {
     path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FormField {
+    #[serde(rename = "ref")]
+    ref_: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FillFormArgs {
+    page: String,
+    /// Fields to fill: each { ref, value }. Existing content is replaced.
+    fields: Vec<FormField>,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -512,6 +526,51 @@ impl BrowserServer {
         let page = self.page_of(&a.page).await?;
         let md = page.read_markdown().await.map_err(fail)?;
         Ok(ok(md))
+    }
+
+    /// Fill several fields in one call (each replaces existing content).
+    #[tool(description = "Fill multiple fields at once by ref; returns settle-diff")]
+    async fn browser_fill_form(
+        &self,
+        Parameters(a): Parameters<FillFormArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let mut done = 0;
+        for f in &a.fields {
+            let backend = self.backend_of(&a.page, &f.ref_).await?;
+            page.type_text(backend, &f.value, true).await.map_err(fail)?;
+            done += 1;
+        }
+        let diff = self.settle_diff(&a.page, &page).await?;
+        Ok(ok(format!("filled {done} field(s) on {}\n\n{}", a.page, diff)))
+    }
+
+    /// Save the page as a PDF file; returns the path. (Headless mode only.)
+    #[tool(description = "Save the page as a PDF file (headless mode only); returns the path")]
+    async fn browser_pdf(
+        &self,
+        Parameters(a): Parameters<StorageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let bytes = page.pdf().await.map_err(fail)?;
+        tokio::fs::write(&a.path, &bytes).await.map_err(fail)?;
+        Ok(ok(format!("{} ({} bytes)", a.path, bytes.len())))
+    }
+
+    /// Return the page's full serialized HTML.
+    #[tool(description = "Get the page's full HTML (document.documentElement.outerHTML)")]
+    async fn browser_get_html(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let mut html = page.html().await.map_err(fail)?;
+        const MAX: usize = 200_000;
+        if html.len() > MAX {
+            html.truncate(MAX);
+            html.push_str("\n… (truncated)");
+        }
+        Ok(ok(html))
     }
 
     /// Save a full-page PNG screenshot to a temp file; returns its path.
