@@ -10,10 +10,14 @@ actually use well, in a single ~5 MB binary.
 ## Install
 
 ```bash
-npm i -g agent-browser-mcp        # prebuilt native binary, no Node/Playwright runtime
+# curl (no npm/Rust needed — downloads the prebuilt binary)
+curl -fsSL https://raw.githubusercontent.com/maestrojeong/agent-browser-mcp/main/install.sh | sh
+
+# or npm
+npm i -g agent-browser-mcp
+
 agent-browser --port 9321         # HTTP MCP at http://127.0.0.1:9321/mcp
-# or stdio:
-agent-browser
+agent-browser                     # or stdio
 ```
 
 Alternatives: grab a binary from [Releases](../../releases), or
