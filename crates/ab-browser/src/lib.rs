@@ -814,7 +814,7 @@ impl Page {
                 )
                 .await?;
             // Key hold time (press duration), then release.
-            tokio::time::sleep(Duration::from_millis(rand_u64(25, 75))).await;
+            tokio::time::sleep(Duration::from_millis(rand_u64(20, 90))).await;
             self.client
                 .send_on(
                     &self.session_id,
@@ -822,11 +822,17 @@ impl Page {
                     json!({ "type": "keyUp", "key": s }),
                 )
                 .await?;
-            // Inter-key gap: variable, with occasional human "thinking" pauses.
-            let mut gap = rand_u64(40, 150);
-            if rand_u64(0, 100) < 12 {
-                gap += rand_u64(160, 440);
-            }
+            // Inter-key gap with real human burstiness (bimodal): most keys are
+            // moderate, ~12% are fast bursts, ~18% are longer "thinking" pauses.
+            // High variance is itself a human signal — metronomic typing is a tell.
+            let roll = rand_u64(0, 100);
+            let gap = if roll < 12 {
+                rand_u64(18, 55) // fast burst
+            } else if roll < 30 {
+                rand_u64(190, 560) // pause
+            } else {
+                rand_u64(55, 175) // normal
+            };
             tokio::time::sleep(Duration::from_millis(gap)).await;
         }
         Ok(())
