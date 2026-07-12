@@ -276,6 +276,7 @@ impl Browser {
             client: self.client.clone(),
             session_id,
             target_id,
+            pointer: Arc::new(Mutex::new(None)),
         };
         // No page patching by default: an untouched real Chrome is the goal.
         if self.inject_stealth {
@@ -305,6 +306,10 @@ pub struct Page {
     client: CdpClient,
     session_id: String,
     target_id: String,
+    /// Last known pointer position (shared across clones of this page) so mouse
+    /// motion is *continuous* — the next move starts where the last one ended,
+    /// instead of teleporting to a fresh random origin every click.
+    pointer: Arc<Mutex<Option<(f64, f64)>>>,
 }
 
 impl Page {
@@ -644,13 +649,21 @@ impl Page {
     /// settle. Behavioral detectors flag the sparse, uniform jumps a naive
     /// automation makes; this produces dense, non-uniform, curved motion.
     async fn human_move_to(&self, x: f64, y: f64) -> Result<()> {
-        // Start offset from the target so there is real travel.
-        let sx = x - 90.0 + rand_f64(60.0);
-        let sy = y - 60.0 + rand_f64(40.0);
+        // Continue from wherever the pointer currently is (continuous motion).
+        // On the very first move, begin from a plausible resting point.
+        let (sx, sy) = {
+            let p = self.pointer.lock().unwrap();
+            match *p {
+                Some(pos) => pos,
+                None => (x - 120.0 + rand_f64(90.0), y - 90.0 + rand_f64(70.0)),
+            }
+        };
         let dx = x - sx;
         let dy = y - sy;
         let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-        let steps = ((dist / 4.0) as usize).clamp(14, 64);
+        // ~1 step per 3.5 px so even fast flicks stay dense (small per-event
+        // deltas, like a real 60-120 Hz pointer).
+        let steps = ((dist / 3.5) as usize).clamp(16, 120);
 
         // Perpendicular unit vector, for a curved (not straight) path.
         let nx = -dy / dist;
@@ -690,7 +703,7 @@ impl Page {
             }
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
-        // Land exactly on the target.
+        // Land exactly on the target and remember it as the current position.
         self.client
             .send_on(
                 &self.session_id,
@@ -698,6 +711,7 @@ impl Page {
                 json!({ "type": "mouseMoved", "x": x, "y": y }),
             )
             .await?;
+        *self.pointer.lock().unwrap() = Some((x, y));
         Ok(())
     }
 
@@ -946,17 +960,10 @@ impl Page {
 
 /// More navigation / interaction primitives (parity with mature drivers).
 impl Page {
-    /// Hover the pointer over an element by ref (mouseMoved to its center).
+    /// Hover the pointer over an element by ref — glides there continuously.
     pub async fn hover(&self, backend: i64) -> Result<()> {
         if let Some((x, y)) = self.node_center(backend).await? {
-            self.client
-                .send_on(
-                    &self.session_id,
-                    "Input.dispatchMouseEvent",
-                    json!({ "type": "mouseMoved", "x": x, "y": y }),
-                )
-                .await?;
-            Ok(())
+            self.human_move_to(x, y).await
         } else {
             Err(BrowserError::Protocol("element has no box to hover".into()))
         }
@@ -1229,6 +1236,7 @@ impl Page {
                 json!({ "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "buttons": 0, "clickCount": 1 }),
             )
             .await?;
+        *self.pointer.lock().unwrap() = Some((tx, ty));
         Ok(())
     }
 
