@@ -7,6 +7,23 @@ agent) at it and drive a real browser.
 Think of it as *patchright-mcp, rebuilt in Rust for maximum performance and
 capability* — the browser an agent can actually use well.
 
+## agent-browser vs patchright-mcp
+
+| | patchright-mcp | **agent-browser** |
+|---|---|---|
+| Language | Node/TS | **Rust** (tokio, single static binary) |
+| Browser control | Playwright (Patchright) | **raw CDP**, one multiplexed WebSocket |
+| Stealth approach | *remove* automation tells from a stock binary | *don't create them* — **be a real headful Chrome** |
+| Strongest mode | stealth-patched launch | **`AB_CONNECT` → your own running Chrome** (identical fingerprint) |
+| Agent's view of a page | HTML / DOM dump | **accessibility tree + `[ref]`**, act returns a **settle-diff** |
+| Network control | route/block/mock | ✅ `network_requests` + `route_block` |
+| Session reuse | storage state | ✅ `storage_save` / `storage_load` (cookies + localStorage) |
+| Serving | MCP | **MCP only** (no bundled agent) |
+| License | — | **Apache-2.0** |
+
+Same lineage (an external driver, not a Chromium fork), but a different stealth
+philosophy, a Rust hot path, and an accessibility-first agent interface.
+
 ## Why
 
 | | Playwright / patchright-mcp | **agent-browser** |
@@ -63,23 +80,27 @@ browser.
 - [x] `ab-cdp` — multiplexed CDP client (flatten sessions, event stream)
 - [x] `ab-browser` — Chrome launcher, stealth layer, `navigate` / `evaluate` /
       `snapshot` / `screenshot` + act (`click` / `type` / `press` by ref)
-- [x] `ab-mcp` — rmcp stdio server exposing 15 `browser_*` tools
-- [x] Verified end-to-end against real Chrome (**5/5** fingerprint self-test,
-      click-by-ref navigates the page)
+- [x] `ab-mcp` — rmcp stdio server exposing **24** `browser_*` tools
+- [x] "be a real browser" stealth: headful + real profile + no patching; passes
+      **bot.sannysoft.com with 0 failures** with zero page patching
+- [x] `AB_CONNECT` — attach to your own running Chrome (identical fingerprint)
 - [x] post-action **settle-diff** (act tools return the accessibility-tree delta)
-- [x] `browser_fingerprint_check` self-test + UA de-headless
-- [ ] tabs switching / windows / network interception / download / pdf tools
-- [ ] streamable-HTTP transport
+- [x] network log + URL blocking, cookie/localStorage session save/load
+- [x] dialogs auto-accepted so automation never hangs
+- [ ] file upload / drag / streamable-HTTP transport
 
-## Tools
+## Tools (24)
 
-`browser_navigate` · `browser_snapshot` · `browser_read` · `browser_click` ·
-`browser_type` · `browser_press` · `browser_hover` · `browser_select` ·
-`browser_back` · `browser_wait` · `browser_evaluate` · `browser_screenshot` ·
-`browser_tabs` · `browser_close_page` · `browser_fingerprint_check`
+**Read/see:** `navigate` · `snapshot` · `read` (markdown) · `get_html` ·
+`screenshot` · `pdf` · `pages` · `tabs`
+**Act:** `click` · `type` · `press` · `hover` · `select` · `fill_form` · `back` ·
+`wait` · `evaluate` · `resize` · `close_page`
+**Network/session:** `network_requests` · `route_block` · `storage_save` ·
+`storage_load`
+**Stealth:** `fingerprint_check`
 
-Act tools (`click` / `type` / `press`) wait for the page to settle and return a
-**diff of the accessibility tree** — the cheap "did it work" signal.
+Act tools wait for the page to settle and return a **diff of the accessibility
+tree** — the cheap "did it work" signal.
 
 ## Run as an MCP server
 

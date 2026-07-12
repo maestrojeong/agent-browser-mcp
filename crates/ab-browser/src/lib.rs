@@ -889,6 +889,56 @@ impl Page {
             .unwrap_or("")
             .to_string())
     }
+
+    /// Current document title.
+    pub async fn title(&self) -> Result<String> {
+        Ok(self
+            .evaluate("document.title")
+            .await?
+            .as_str()
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Resize the page's viewport via device-metrics override.
+    pub async fn resize(&self, width: u32, height: u32) -> Result<()> {
+        self.client
+            .send_on(
+                &self.session_id,
+                "Emulation.setDeviceMetricsOverride",
+                json!({
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": false,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Auto-accept JavaScript dialogs (alert/confirm/prompt) so automation never
+    /// blocks on them. Enables the Page domain and handles openings as they come.
+    pub async fn enable_dialog_auto_accept(&self) -> Result<()> {
+        self.client
+            .send_on(&self.session_id, "Page.enable", json!({}))
+            .await?;
+        let mut rx = self.client.events();
+        let sid = self.session_id.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                if ev.session_id.as_deref() == Some(&sid)
+                    && ev.method == "Page.javascriptDialogOpening"
+                {
+                    let _ = client
+                        .send_on(&sid, "Page.handleJavaScriptDialog", json!({ "accept": true }))
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 /// Persistent per-user profile directory (aged profiles look human). Override

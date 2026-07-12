@@ -187,6 +187,13 @@ struct FillFormArgs {
     fields: Vec<FormField>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResizeArgs {
+    page: String,
+    width: u32,
+    height: u32,
+}
+
 /// Build the browser per environment. Default: headful, real profile, no JS
 /// patching (fingerprint == a real human Chrome). Overrides:
 ///   AB_CONNECT=<port>  attach to a Chrome the user already launched (strongest)
@@ -296,6 +303,7 @@ impl BrowserServer {
             .await
             .map_err(fail)?;
         let netlog = page.enable_network_log().await.ok();
+        let _ = page.enable_dialog_auto_accept().await;
         page.navigate(&a.url).await.map_err(fail)?;
         let snap = page.snapshot().await.map_err(fail)?;
         st.next += 1;
@@ -596,6 +604,36 @@ impl BrowserServer {
         } else {
             ids.join(", ")
         }))
+    }
+
+    /// List open pages with their current URL and title.
+    #[tool(description = "List open pages with id, title, and URL")]
+    async fn browser_pages(&self) -> Result<CallToolResult, McpError> {
+        let entries: Vec<(String, Page)> = {
+            let st = self.state.lock().await;
+            st.pages.iter().map(|(k, v)| (k.clone(), v.page.clone())).collect()
+        };
+        if entries.is_empty() {
+            return Ok(ok("(no open pages)".to_string()));
+        }
+        let mut out = String::new();
+        for (id, page) in entries {
+            let title = page.title().await.unwrap_or_default();
+            let url = page.url().await.unwrap_or_default();
+            out.push_str(&format!("{id}  {title:?}  {url}\n"));
+        }
+        Ok(ok(out))
+    }
+
+    /// Resize a page's viewport.
+    #[tool(description = "Resize the page viewport (width x height)")]
+    async fn browser_resize(
+        &self,
+        Parameters(a): Parameters<ResizeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.resize(a.width, a.height).await.map_err(fail)?;
+        Ok(ok(format!("resized {} to {}x{}", a.page, a.width, a.height)))
     }
 
     /// Close a page and forget its refs.
