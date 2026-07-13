@@ -225,6 +225,33 @@ struct BlockArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct RouteMockArgs {
+    page: String,
+    /// URL wildcard pattern to intercept (e.g. "*/api/user", "*doubleclick*").
+    pattern: String,
+    /// Response body to return (default empty).
+    #[serde(default)]
+    body: Option<String>,
+    /// HTTP status code (default 200).
+    #[serde(default)]
+    status: Option<i64>,
+    /// Content-Type header (default "application/json").
+    #[serde(default)]
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DialogArgs {
+    page: String,
+    /// Accept (OK) the dialog if true, dismiss (Cancel) if false. Default true.
+    #[serde(default)]
+    accept: Option<bool>,
+    /// Text to enter for prompt() dialogs.
+    #[serde(default)]
+    prompt_text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StorageArgs {
     page: String,
     /// File path to save to / load from (JSON: cookies + localStorage).
@@ -683,15 +710,87 @@ impl BrowserServer {
         )))
     }
 
-    /// Clear all URL blocking rules.
-    #[tool(description = "Clear all request-blocking rules")]
+    /// Mock a network response for URLs matching a wildcard pattern.
+    #[tool(
+        description = "Mock the response for requests matching a URL wildcard pattern (e.g. */api/*): return a canned body/status/content-type instead of hitting the network. Repeatable for multiple patterns; cleared by browser_route_clear."
+    )]
+    async fn browser_route_mock(
+        &self,
+        Parameters(a): Parameters<RouteMockArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let status = a.status.unwrap_or(200);
+        let body = a.body.unwrap_or_default();
+        let content_type = a
+            .content_type
+            .unwrap_or_else(|| "application/json".to_string());
+        page.route_mock(&a.pattern, status, &body, &content_type)
+            .await
+            .map_err(fail)?;
+        Ok(ok(format!(
+            "mocking {:?} on {} → {} ({}, {} bytes)",
+            a.pattern,
+            a.page,
+            status,
+            content_type,
+            body.len()
+        )))
+    }
+
+    /// Clear all URL blocking + mock rules.
+    #[tool(description = "Clear all request-blocking and mock rules")]
     async fn browser_route_clear(
         &self,
         Parameters(a): Parameters<PageArg>,
     ) -> Result<CallToolResult, McpError> {
         let page = self.page_of(&a.page).await?;
         page.clear_blocked_urls().await.map_err(fail)?;
-        Ok(ok(format!("cleared blocking rules on {}", a.page)))
+        page.clear_routes().await.map_err(fail)?;
+        Ok(ok(format!("cleared blocking + mock rules on {}", a.page)))
+    }
+
+    /// Set how JS dialogs (alert/confirm/prompt) are handled.
+    #[tool(
+        description = "Set JS dialog handling: accept (OK) or dismiss (Cancel) upcoming alert/confirm/prompt/beforeunload dialogs, with optional prompt text. Default is accept."
+    )]
+    async fn browser_handle_dialog(
+        &self,
+        Parameters(a): Parameters<DialogArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let accept = a.accept.unwrap_or(true);
+        page.set_dialog_policy(accept, a.prompt_text.clone());
+        Ok(ok(format!(
+            "dialogs on {} will be {}{}",
+            a.page,
+            if accept { "accepted" } else { "dismissed" },
+            a.prompt_text
+                .map(|t| format!(" (prompt text: {t:?})"))
+                .unwrap_or_default()
+        )))
+    }
+
+    /// Draw a highlight box over an element (debug aid).
+    #[tool(description = "Highlight an element by ref/selector with an overlay box (debug/inspection)")]
+    async fn browser_highlight(
+        &self,
+        Parameters(a): Parameters<RefArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let backend = self.resolve(&a.page, &a.ref_, &a.selector).await?;
+        let page = self.page_of(&a.page).await?;
+        page.highlight(backend).await.map_err(fail)?;
+        Ok(ok(format!("highlighted element on {}", a.page)))
+    }
+
+    /// Remove the highlight box.
+    #[tool(description = "Remove the highlight overlay box")]
+    async fn browser_hide_highlight(
+        &self,
+        Parameters(a): Parameters<PageArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        page.hide_highlight().await.map_err(fail)?;
+        Ok(ok(format!("highlight removed on {}", a.page)))
     }
 
     /// Toggle offline network emulation.

@@ -40,7 +40,7 @@ Register with an MCP client:
 | Stealth approach | *patch away* automation tells | *don't create them* — **be a real browser** |
 | Strongest mode | stealth-patched launch | **attach to your own Chrome** (`--connect`) — identical fingerprint |
 | Agent's view | HTML / DOM dump | **accessibility tree + `[ref]`**, act returns a **settle-diff** |
-| Tool surface | ~60 tools | **55 tools** (near-complete parity) |
+| Tool surface | ~60 tools | **59 tools** (near-complete parity) |
 | Transports | stdio + HTTP/SSE | **stdio + HTTP/SSE** (same CLI flags) |
 | Footprint | ~79 MB install, ~182 MB RSS | **~5 MB binary, ~6 MB RSS** |
 | Startup / per-op | baseline | **~100× faster start, ~2–3× per op** |
@@ -75,7 +75,7 @@ Result: **0 detections** on
 [bot.sannysoft.com](https://bot.sannysoft.com), and **0% stealth** on CreepJS —
 all with zero page patching.
 
-## Tools (55)
+## Tools (59)
 
 **Read/see:** `navigate` · `new_page` · `snapshot` · `read` (markdown) ·
 `get_html` · `get_text` · `find` · `screenshot` · `pdf` · `pages` · `tabs` ·
@@ -84,11 +84,12 @@ all with zero page patching.
 `select` · `fill_form` · `drag` · `file_upload` · `back` · `wait` · `resize` ·
 `evaluate` · `run_code` · `iframe_click` · `iframe_fill` · `close_page` · `close`
 **Network:** `network_requests` · `route_block` · `route_clear` ·
-`network_state_set` (offline) · `api_request`
+`network_state_set` (offline) · `route_mock` · `api_request`
 **Cookies:** `cookie_{list,get,set,delete,clear}`
 **Web storage:** `localstorage_{list,get,set,delete,clear}` ·
 `sessionstorage_{list,get,set,delete,clear}` · `storage_save` · `storage_load`
 **Diagnostics:** `console_messages` · `fingerprint_check`
+**Dialogs/debug:** `handle_dialog` · `highlight` · `hide_highlight`
 **Auth:** `webauthn` (install a virtual authenticator so passkey prompts don't block; sites fall back to password)
 
 Act tools take a snapshot `ref` **or** a CSS `selector`, wait for the page to

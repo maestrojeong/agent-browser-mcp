@@ -277,6 +277,8 @@ impl Browser {
             session_id,
             target_id,
             pointer: Arc::new(Mutex::new(None)),
+            dialog: Arc::new(Mutex::new((true, None))),
+            routes: Arc::new(Mutex::new(RouteState::default())),
         };
         // No page patching by default: an untouched real Chrome is the goal.
         if self.inject_stealth {
@@ -300,6 +302,24 @@ impl Browser {
     }
 }
 
+/// A mocked route: requests whose URL matches `pattern` are fulfilled with this
+/// canned response instead of hitting the network.
+#[derive(Clone)]
+struct RouteMock {
+    pattern: String,
+    status: i64,
+    body: String,
+    content_type: String,
+}
+
+/// Per-page network-routing state (mock rules + whether the Fetch intercept
+/// loop is already running).
+#[derive(Default)]
+struct RouteState {
+    mocks: Vec<RouteMock>,
+    loop_started: bool,
+}
+
 /// A single attached tab.
 #[derive(Clone)]
 pub struct Page {
@@ -310,6 +330,10 @@ pub struct Page {
     /// motion is *continuous* — the next move starts where the last one ended,
     /// instead of teleporting to a fresh random origin every click.
     pointer: Arc<Mutex<Option<(f64, f64)>>>,
+    /// JS-dialog handling policy: (accept, prompt_text). Read by the auto-handler.
+    dialog: Arc<Mutex<(bool, Option<String>)>>,
+    /// Network mock rules + intercept-loop state.
+    routes: Arc<Mutex<RouteState>>,
 }
 
 impl Page {
@@ -1680,17 +1704,186 @@ impl Page {
         let mut rx = self.client.events();
         let sid = self.session_id.clone();
         let client = self.client.clone();
+        let policy = self.dialog.clone();
         tokio::spawn(async move {
             while let Ok(ev) = rx.recv().await {
                 if ev.session_id.as_deref() == Some(&sid)
                     && ev.method == "Page.javascriptDialogOpening"
                 {
+                    // Snapshot the policy without holding the lock across await.
+                    let (accept, text) = {
+                        let p = policy.lock().unwrap();
+                        (p.0, p.1.clone())
+                    };
+                    let mut params = json!({ "accept": accept });
+                    if let Some(t) = text {
+                        params["promptText"] = json!(t);
+                    }
                     let _ = client
-                        .send_on(&sid, "Page.handleJavaScriptDialog", json!({ "accept": true }))
+                        .send_on(&sid, "Page.handleJavaScriptDialog", params)
                         .await;
                 }
             }
         });
+        Ok(())
+    }
+
+    /// Set how the next JS dialogs (alert/confirm/prompt/beforeunload) are
+    /// handled: accept vs dismiss, plus optional prompt text. Applies to the
+    /// running auto-handler; default is accept.
+    pub fn set_dialog_policy(&self, accept: bool, prompt_text: Option<String>) {
+        *self.dialog.lock().unwrap() = (accept, prompt_text);
+    }
+
+    /// Draw a highlight box over an element (debug/inspection aid).
+    pub async fn highlight(&self, backend: i64) -> Result<()> {
+        self.scroll_into_view(backend).await;
+        let Some(obj) = self.resolve_object(backend).await? else {
+            return Err(BrowserError::Protocol("cannot resolve element".into()));
+        };
+        self.client
+            .send_on(
+                &self.session_id,
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": obj,
+                    "functionDeclaration": r#"function(){
+                        const r = this.getBoundingClientRect();
+                        let o = document.getElementById('__brs_hl');
+                        if (!o) { o = document.createElement('div'); o.id = '__brs_hl'; document.body.appendChild(o); }
+                        o.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;box-sizing:border-box;'
+                          + 'border:2px solid #ff3b30;background:rgba(255,59,48,0.15);'
+                          + `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`;
+                    }"#,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Remove the highlight box.
+    pub async fn hide_highlight(&self) -> Result<()> {
+        self.evaluate("(()=>{ const o=document.getElementById('__brs_hl'); if(o) o.remove(); return true; })()")
+            .await?;
+        Ok(())
+    }
+
+    /// Mock all requests whose URL matches `pattern` (CDP wildcard, e.g.
+    /// "*/api/*") with a canned response. Uses the Fetch domain; the intercept
+    /// loop is started once and consults the accumulated mock rules.
+    pub async fn route_mock(
+        &self,
+        pattern: &str,
+        status: i64,
+        body: &str,
+        content_type: &str,
+    ) -> Result<()> {
+        // Register/replace the rule for this pattern.
+        let start_loop = {
+            let mut st = self.routes.lock().unwrap();
+            st.mocks.retain(|m| m.pattern != pattern);
+            st.mocks.push(RouteMock {
+                pattern: pattern.to_string(),
+                status,
+                body: body.to_string(),
+                content_type: content_type.to_string(),
+            });
+            let first = !st.loop_started;
+            st.loop_started = true;
+            first
+        };
+
+        // (Re)enable Fetch with the union of all mock patterns.
+        let patterns: Vec<Value> = {
+            let st = self.routes.lock().unwrap();
+            st.mocks
+                .iter()
+                .map(|m| json!({ "urlPattern": m.pattern }))
+                .collect()
+        };
+        self.client
+            .send_on(&self.session_id, "Fetch.enable", json!({ "patterns": patterns }))
+            .await?;
+
+        if start_loop {
+            let mut rx = self.client.events();
+            let sid = self.session_id.clone();
+            let client = self.client.clone();
+            let routes = self.routes.clone();
+            tokio::spawn(async move {
+                use base64::Engine;
+                while let Ok(ev) = rx.recv().await {
+                    if ev.session_id.as_deref() != Some(&sid)
+                        || ev.method != "Fetch.requestPaused"
+                    {
+                        continue;
+                    }
+                    let request_id = ev
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let url = ev
+                        .params
+                        .get("request")
+                        .and_then(|r| r.get("url"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    // Find a matching mock (simple wildcard: '*' = any run).
+                    let hit = {
+                        let st = routes.lock().unwrap();
+                        st.mocks
+                            .iter()
+                            .find(|m| wildcard_match(&m.pattern, url))
+                            .cloned()
+                    };
+                    match hit {
+                        Some(m) => {
+                            let b64 = base64::engine::general_purpose::STANDARD
+                                .encode(m.body.as_bytes());
+                            let _ = client
+                                .send_on(
+                                    &sid,
+                                    "Fetch.fulfillRequest",
+                                    json!({
+                                        "requestId": request_id,
+                                        "responseCode": m.status,
+                                        "responseHeaders": [
+                                            { "name": "Content-Type", "value": m.content_type },
+                                            { "name": "Access-Control-Allow-Origin", "value": "*" }
+                                        ],
+                                        "body": b64,
+                                    }),
+                                )
+                                .await;
+                        }
+                        None => {
+                            let _ = client
+                                .send_on(
+                                    &sid,
+                                    "Fetch.continueRequest",
+                                    json!({ "requestId": request_id }),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Drop all mock rules and disable request interception.
+    pub async fn clear_routes(&self) -> Result<()> {
+        {
+            let mut st = self.routes.lock().unwrap();
+            st.mocks.clear();
+        }
+        let _ = self
+            .client
+            .send_on(&self.session_id, "Fetch.disable", json!({}))
+            .await;
         Ok(())
     }
 }
@@ -1753,6 +1946,33 @@ fn off_center(half: f64) -> f64 {
     let frac = 0.12 + (rand_u64(0, 28) as f64) / 100.0; // 0.12..0.40
     let sign = if rand_u64(0, 1) == 0 { -1.0 } else { 1.0 };
     sign * frac * half
+}
+
+/// Minimal glob matcher supporting `*` (matches any run, including empty), to
+/// pick which mock rule a paused request URL belongs to. Mirrors the CDP
+/// Fetch `urlPattern` wildcard semantics closely enough for routing.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut pos = 0usize;
+    let first = parts[0];
+    if !text.starts_with(first) {
+        return false;
+    }
+    pos += first.len();
+    for seg in &parts[1..parts.len() - 1] {
+        if seg.is_empty() {
+            continue;
+        }
+        match text[pos..].find(seg) {
+            Some(i) => pos += i + seg.len(),
+            None => return false,
+        }
+    }
+    let last = parts[parts.len() - 1];
+    last.is_empty() || text[pos..].ends_with(last)
 }
 
 fn detect_chrome() -> Option<PathBuf> {
