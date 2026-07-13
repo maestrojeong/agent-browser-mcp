@@ -1208,6 +1208,45 @@ impl Page {
         Ok(())
     }
 
+    /// Install a CDP virtual authenticator so WebAuthn / passkey prompts are
+    /// handled programmatically instead of blocking on the native OS passkey
+    /// dialog (which captures input and stalls automation). With no registered
+    /// credential, `navigator.credentials.get()` fails fast, so sites fall back
+    /// to another sign-in method (e.g. password) instead of hanging. Returns the
+    /// authenticatorId. `transport` is typically "internal" (platform passkey).
+    pub async fn webauthn_enable(
+        &self,
+        transport: &str,
+        user_verified: bool,
+        resident_key: bool,
+    ) -> Result<String> {
+        self.client
+            .send_on(&self.session_id, "WebAuthn.enable", json!({ "enableUI": false }))
+            .await?;
+        let res = self
+            .client
+            .send_on(
+                &self.session_id,
+                "WebAuthn.addVirtualAuthenticator",
+                json!({
+                    "options": {
+                        "protocol": "ctap2",
+                        "transport": transport,
+                        "hasResidentKey": resident_key,
+                        "hasUserVerification": true,
+                        "isUserVerified": user_verified,
+                        "automaticPresenceSimulation": true,
+                    }
+                }),
+            )
+            .await?;
+        Ok(res
+            .get("authenticatorId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    }
+
     /// Navigate back one entry in the tab's history and wait for load.
     pub async fn go_back(&self) -> Result<()> {
         let hist = self

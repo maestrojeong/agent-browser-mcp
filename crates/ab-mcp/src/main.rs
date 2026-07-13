@@ -179,6 +179,20 @@ struct SelectArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct WebAuthnArgs {
+    page: String,
+    /// Authenticator transport: "internal" (platform passkey, default), "usb", "nfc", "ble".
+    #[serde(default)]
+    transport: Option<String>,
+    /// Report user verification as satisfied (default true).
+    #[serde(default)]
+    user_verified: Option<bool>,
+    /// Support resident keys / discoverable credentials (default true).
+    #[serde(default)]
+    resident_key: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WaitArgs {
     page: String,
     /// Wait until this text appears anywhere on the page.
@@ -927,6 +941,28 @@ impl BrowserServer {
         page.select_option(backend, &a.value).await.map_err(fail)?;
         let diff = self.settle_diff(&a.page, &page).await?;
         Ok(ok(format!("selected {:?} on {}\n\n{}", a.value, a.page, diff)))
+    }
+
+    /// Install a virtual authenticator so WebAuthn/passkey prompts don't block.
+    #[tool(
+        description = "Install a CDP virtual authenticator on the page so WebAuthn/passkey prompts resolve programmatically instead of blocking on the native OS passkey dialog. With no registered credential, navigator.credentials.get() fails fast so the site falls back to another method (e.g. password). Call BEFORE a passkey challenge appears."
+    )]
+    async fn browser_webauthn(
+        &self,
+        Parameters(a): Parameters<WebAuthnArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let page = self.page_of(&a.page).await?;
+        let transport = a.transport.as_deref().unwrap_or("internal");
+        let user_verified = a.user_verified.unwrap_or(true);
+        let resident_key = a.resident_key.unwrap_or(true);
+        let id = page
+            .webauthn_enable(transport, user_verified, resident_key)
+            .await
+            .map_err(fail)?;
+        Ok(ok(format!(
+            "virtual authenticator installed on {} (transport={transport}, authenticatorId={id}). Passkey prompts will no longer block; sites fall back to password when no credential matches.",
+            a.page
+        )))
     }
 
     /// Navigate back one entry in the page's history.

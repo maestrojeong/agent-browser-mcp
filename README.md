@@ -40,7 +40,7 @@ Register with an MCP client:
 | Stealth approach | *patch away* automation tells | *don't create them* — **be a real browser** |
 | Strongest mode | stealth-patched launch | **attach to your own Chrome** (`--connect`) — identical fingerprint |
 | Agent's view | HTML / DOM dump | **accessibility tree + `[ref]`**, act returns a **settle-diff** |
-| Tool surface | ~60 tools | **54 tools** (near-complete parity) |
+| Tool surface | ~60 tools | **55 tools** (near-complete parity) |
 | Transports | stdio + HTTP/SSE | **stdio + HTTP/SSE** (same CLI flags) |
 | Footprint | ~79 MB install, ~182 MB RSS | **~5 MB binary, ~6 MB RSS** |
 | Startup / per-op | baseline | **~100× faster start, ~2–3× per op** |
@@ -75,7 +75,7 @@ Result: **0 detections** on
 [bot.sannysoft.com](https://bot.sannysoft.com), and **0% stealth** on CreepJS —
 all with zero page patching.
 
-## Tools (54)
+## Tools (55)
 
 **Read/see:** `navigate` · `new_page` · `snapshot` · `read` (markdown) ·
 `get_html` · `get_text` · `find` · `screenshot` · `pdf` · `pages` · `tabs` ·
@@ -89,6 +89,7 @@ all with zero page patching.
 **Web storage:** `localstorage_{list,get,set,delete,clear}` ·
 `sessionstorage_{list,get,set,delete,clear}` · `storage_save` · `storage_load`
 **Diagnostics:** `console_messages` · `fingerprint_check`
+**Auth:** `webauthn` (install a virtual authenticator so passkey prompts don't block; sites fall back to password)
 
 Act tools take a snapshot `ref` **or** a CSS `selector`, wait for the page to
 settle, and return a **diff of the accessibility tree** — the "did it work"
