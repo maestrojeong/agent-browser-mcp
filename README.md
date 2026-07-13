@@ -78,11 +78,11 @@ all with zero page patching.
 ## Tools (59)
 
 **Read/see:** `navigate` · `new_page` · `snapshot` · `read` (markdown) ·
-`get_html` · `get_text` · `find` · `screenshot` · `pdf` · `pages` · `tabs` ·
+`get_visible_html` · `get_visible_text` · `find` · `take_screenshot` · `save_pdf` · `pages` · `tabs` ·
 `switch_page` · `status`
-**Act (by `ref` or CSS `selector`):** `click` · `type` · `press` · `hover` ·
-`select` · `fill_form` · `drag` · `file_upload` · `back` · `wait` · `resize` ·
-`evaluate` · `run_code` · `iframe_click` · `iframe_fill` · `close_page` · `close`
+**Act (by `ref` or CSS `selector`):** `click` · `type` · `press_key` · `hover` ·
+`select_option` · `fill_form` · `drag` · `file_upload` · `navigate_back` · `wait_for` · `resize` ·
+`evaluate` · `run_code_unsafe` · `iframe_click` · `iframe_fill` · `close_page` · `close`
 **Network:** `network_requests` · `route_block` · `route_clear` ·
 `network_state_set` (offline) · `route_mock` · `api_request`
 **Cookies:** `cookie_{list,get,set,delete,clear}`

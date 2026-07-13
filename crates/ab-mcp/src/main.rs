@@ -24,9 +24,9 @@ const INSTRUCTIONS: &str = r#"browser-rs — a real Chrome driven over CDP, no b
 
 Loop: browser_navigate -> browser_snapshot -> act (click/type) -> re-snapshot to verify.
 - snapshot renders the page as an accessibility tree; interactive nodes carry [ref=eN] handles.
-- act on them by ref with browser_click / browser_type / browser_press.
+- act on them by ref with browser_click / browser_type / browser_press_key.
 - refs go stale when the page changes — re-snapshot before reusing them.
-- browser_evaluate runs one-shot JS; browser_screenshot saves a PNG.
+- browser_evaluate runs one-shot JS; browser_take_screenshot saves a PNG.
 Stealth: this browser never enables the detectable CDP domains (no Runtime.enable)."#;
 
 struct PageEntry {
@@ -651,7 +651,7 @@ impl BrowserServer {
 
     /// Press a named key on a page, then report what changed.
     #[tool(description = "Press a key (Enter, Tab, Escape, ...); returns settle-diff")]
-    async fn browser_press(
+    async fn browser_press_key(
         &self,
         Parameters(a): Parameters<PressArgs>,
     ) -> Result<CallToolResult, McpError> {
@@ -1031,7 +1031,7 @@ impl BrowserServer {
 
     /// Select an <option> in a dropdown by ref + value.
     #[tool(description = "Select a dropdown option by ref and value; returns settle-diff")]
-    async fn browser_select(
+    async fn browser_select_option(
         &self,
         Parameters(a): Parameters<SelectArgs>,
     ) -> Result<CallToolResult, McpError> {
@@ -1066,7 +1066,7 @@ impl BrowserServer {
 
     /// Navigate back one entry in the page's history.
     #[tool(description = "Go back one history entry; returns settle-diff")]
-    async fn browser_back(
+    async fn browser_navigate_back(
         &self,
         Parameters(a): Parameters<PageArg>,
     ) -> Result<CallToolResult, McpError> {
@@ -1078,7 +1078,7 @@ impl BrowserServer {
 
     /// Wait until text appears or a selector matches (whichever is given).
     #[tool(description = "Wait for text or a CSS selector to appear")]
-    async fn browser_wait(
+    async fn browser_wait_for(
         &self,
         Parameters(a): Parameters<WaitArgs>,
     ) -> Result<CallToolResult, McpError> {
@@ -1145,7 +1145,7 @@ impl BrowserServer {
 
     /// Save the page as a PDF file; returns the path. (Headless mode only.)
     #[tool(description = "Save the page as a PDF file (headless mode only); returns the path")]
-    async fn browser_pdf(
+    async fn browser_save_pdf(
         &self,
         Parameters(a): Parameters<StorageArgs>,
     ) -> Result<CallToolResult, McpError> {
@@ -1157,7 +1157,7 @@ impl BrowserServer {
 
     /// Return the page's full serialized HTML.
     #[tool(description = "Get the page's full HTML (document.documentElement.outerHTML)")]
-    async fn browser_get_html(
+    async fn browser_get_visible_html(
         &self,
         Parameters(a): Parameters<PageArg>,
     ) -> Result<CallToolResult, McpError> {
@@ -1173,7 +1173,7 @@ impl BrowserServer {
 
     /// Extract the page's visible text (innerText).
     #[tool(description = "Get the page's visible text (innerText)")]
-    async fn browser_get_text(
+    async fn browser_get_visible_text(
         &self,
         Parameters(a): Parameters<PageArg>,
     ) -> Result<CallToolResult, McpError> {
@@ -1290,7 +1290,7 @@ impl BrowserServer {
 
     /// Run arbitrary JavaScript with args (isolated world). Returns the result.
     #[tool(description = "Run a JS body with an args array (isolated world); returns its result")]
-    async fn browser_run_code(
+    async fn browser_run_code_unsafe(
         &self,
         Parameters(a): Parameters<RunCodeArgs>,
     ) -> Result<CallToolResult, McpError> {
@@ -1335,7 +1335,7 @@ impl BrowserServer {
 
     /// Save a full-page PNG screenshot to a temp file; returns its path.
     #[tool(description = "Capture a full-page PNG screenshot; returns the file path")]
-    async fn browser_screenshot(
+    async fn browser_take_screenshot(
         &self,
         Parameters(a): Parameters<PageArg>,
     ) -> Result<CallToolResult, McpError> {
