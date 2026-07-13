@@ -20,6 +20,9 @@ No npm/Node/Rust needed — the script downloads the prebuilt binary for your
 platform. Alternatives: grab a binary from [Releases](../../releases), or
 `cargo install --git https://github.com/maestrojeong/browser-rs-mcp ab-mcp`.
 
+Full instructions (version pinning, direct download, MCP client setup,
+updating): **[INSTALL.md](INSTALL.md)**.
+
 Register with an MCP client:
 
 ```jsonc
