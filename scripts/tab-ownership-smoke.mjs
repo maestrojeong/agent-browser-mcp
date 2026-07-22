@@ -69,20 +69,24 @@ try {
   const pages = await call("browser_pages");
   assert.match(pages, /p1  owner=worker-a/);
 
-  const popup = pages.match(/^(p\d+)  owner=-/m)?.[1];
+  const popup = clickResult.match(/new pages: (p\d+)/)?.[1];
   assert.ok(popup, `popup page id missing:\n${pages}`);
-  await call("browser_claim_page", { owner: "worker-b", page: popup });
+  assert.match(
+    pages,
+    new RegExp(`^${popup}  owner=worker-a\\b`, "m"),
+    "popup should inherit its opener's owner",
+  );
 
   const conflict = await request("tools/call", {
     name: "browser_claim_page",
-    arguments: { owner: "worker-c", page: popup },
+    arguments: { owner: "worker-b", page: popup },
   });
   assert.ok(conflict.error || conflict.result?.isError, "conflicting claim should fail");
 
-  await call("browser_close_page", { page: "worker-b" });
+  await call("browser_close_page", { page: popup });
   const afterClose = await call("browser_pages");
-  assert.doesNotMatch(afterClose, /worker-b/);
-  console.log("PASS tab ownership aliases, popup tracking, conflict rejection, claim cleanup");
+  assert.doesNotMatch(afterClose, new RegExp(`^${popup}  `, "m"));
+  console.log("PASS tab ownership aliases, popup inheritance, conflict rejection, claim cleanup");
 } finally {
   child.kill();
 }

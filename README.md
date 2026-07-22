@@ -139,9 +139,11 @@ browser-rs --port 9321 [options]    # HTTP MCP transport at /mcp
 ```
 
 Every flag has an env equivalent (`AB_HTTP`, `AB_PROFILE`, `AB_HEADLESS`,
-`AB_CONNECT`, `AB_STEALTH`, `AB_CHROME`). Because it takes `--port` +
-`--user-data-dir` like `mcp-patchright`, a host can allocate one port per
-profile and connect multiple owner-scoped sessions to it.
+`AB_CONNECT`, `AB_STEALTH`, `AB_CHROME`). Set `AB_HTTP_CAPABILITY` to require
+the same value in the `X-Browser-Capability` header on every HTTP/SSE request.
+The capability is mandatory when binding to a non-loopback host.
+Because it takes `--port` + `--user-data-dir` like `mcp-patchright`, a host can
+allocate one port per profile and connect multiple owner-scoped sessions to it.
 
 ## Benchmarks (browser + detector co-evolve)
 

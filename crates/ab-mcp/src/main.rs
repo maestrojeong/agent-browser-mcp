@@ -38,12 +38,44 @@ fn request_owner() -> Option<String> {
     REQUEST_OWNER.try_with(Clone::clone).ok().flatten()
 }
 
+fn enforce_scoped_owner(requested_owner: &str, operation: &str) -> Result<(), McpError> {
+    if let Some(scoped_owner) = request_owner() {
+        if requested_owner != scoped_owner {
+            return Err(fail(format!(
+                "this MCP connection may only {operation} owner '{scoped_owner}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn release_owner_claim(
+    st: &mut State,
+    owner: &str,
+    preserve_durable_owner: bool,
+) -> Option<String> {
+    let page = st.owners.remove(owner)?;
+    if !preserve_durable_owner {
+        st.page_owners.retain(|_, page_owner| page_owner != owner);
+    }
+    Some(page)
+}
+
+fn webauthn_options_match_automatic_defaults(
+    transport: &str,
+    user_verified: bool,
+    resident_key: bool,
+) -> bool {
+    transport == "internal" && user_verified && resident_key
+}
+
 struct PageEntry {
     page: Page,
     refs: HashMap<String, i64>,
     last_text: String,
     netlog: Option<NetworkLog>,
     consolelog: Option<ConsoleLog>,
+    webauthn_authenticator_id: Option<String>,
 }
 
 /// Order-insensitive line diff: what appeared / disappeared between snapshots.
@@ -650,6 +682,11 @@ impl BrowserServer {
                 .map_err(fail)?;
             let netlog = page.enable_network_log().await.ok();
             let _ = page.enable_dialog_auto_accept().await;
+            let webauthn_authenticator_id = Some(
+                page.webauthn_enable("internal", true, true)
+                    .await
+                    .map_err(fail)?,
+            );
             let snap = page.snapshot().await.map_err(fail)?;
             st.next += 1;
             let id = format!("p{}", st.next);
@@ -661,6 +698,7 @@ impl BrowserServer {
                     last_text: snap.text,
                     netlog,
                     consolelog: None,
+                    webauthn_authenticator_id,
                 },
             );
             if let Some(owner) = inherited_owner {
@@ -737,6 +775,13 @@ impl BrowserServer {
             .map_err(fail)?;
         let netlog = page.enable_network_log().await.ok();
         let _ = page.enable_dialog_auto_accept().await;
+        // Install before navigation so a page cannot open a native passkey
+        // chooser during its first load and block browser automation.
+        let webauthn_authenticator_id = Some(
+            page.webauthn_enable("internal", true, true)
+                .await
+                .map_err(fail)?,
+        );
         if !url.is_empty() && url != "about:blank" {
             page.navigate(url).await.map_err(fail)?;
         }
@@ -751,6 +796,7 @@ impl BrowserServer {
                 last_text: snap.text.clone(),
                 netlog,
                 consolelog: None,
+                webauthn_authenticator_id,
             },
         );
         if let Some(owner) = request_owner() {
@@ -1317,17 +1363,39 @@ impl BrowserServer {
         &self,
         Parameters(a): Parameters<WebAuthnArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let page = self.page_of(&a.page).await?;
+        let page_id = self.canonical_page_id(&a.page).await?;
+        let (page, existing_id) = {
+            let st = self.state.lock().await;
+            let entry = st
+                .pages
+                .get(&page_id)
+                .ok_or_else(|| fail(format!("unknown page or owner '{}'", a.page)))?;
+            (entry.page.clone(), entry.webauthn_authenticator_id.clone())
+        };
         let transport = a.transport.as_deref().unwrap_or("internal");
         let user_verified = a.user_verified.unwrap_or(true);
         let resident_key = a.resident_key.unwrap_or(true);
-        let id = page
-            .webauthn_enable(transport, user_verified, resident_key)
-            .await
-            .map_err(fail)?;
+        let (id, actual_transport, already_installed) = if let Some(id) = existing_id {
+            if !webauthn_options_match_automatic_defaults(transport, user_verified, resident_key) {
+                return Err(fail(
+                    "this page already has the automatic WebAuthn authenticator (transport=internal, user_verified=true, resident_key=true); replacing it is not supported",
+                ));
+            }
+            (id, "internal", true)
+        } else {
+            let id = page
+                .webauthn_enable(transport, user_verified, resident_key)
+                .await
+                .map_err(fail)?;
+            if let Some(entry) = self.state.lock().await.pages.get_mut(&page_id) {
+                entry.webauthn_authenticator_id = Some(id.clone());
+            }
+            (id, transport, false)
+        };
         Ok(ok(format!(
-            "virtual authenticator installed on {} (transport={transport}, authenticatorId={id}). Passkey prompts will no longer block; sites fall back to password when no credential matches.",
-            a.page
+            "virtual authenticator {} on {} (transport={actual_transport}, authenticatorId={id}). Passkey prompts will no longer block; sites fall back to password when no credential matches.",
+            if already_installed { "already installed" } else { "installed" },
+            a.page,
         )))
     }
 
@@ -1503,6 +1571,15 @@ impl BrowserServer {
     async fn browser_status(&self) -> Result<CallToolResult, McpError> {
         let st = self.state.lock().await;
         let running = st.browser.is_some();
+        let open_pages = request_owner().map_or_else(
+            || st.pages.len(),
+            |owner| {
+                st.page_owners
+                    .values()
+                    .filter(|page_owner| *page_owner == &owner)
+                    .count()
+            },
+        );
         let mode = if std::env::var("AB_CONNECT").is_ok() {
             "connect"
         } else if std::env::var("AB_HEADLESS").is_ok() {
@@ -1515,8 +1592,7 @@ impl BrowserServer {
             "headful (be-real)"
         };
         Ok(ok(format!(
-            "running: {running}\nmode: {mode}\nopen pages: {}",
-            st.pages.len()
+            "running: {running}\nmode: {mode}\nopen pages: {open_pages}"
         )))
     }
 
@@ -1724,13 +1800,7 @@ impl BrowserServer {
             return Err(fail("owner must not be empty"));
         }
         let mut st = self.state.lock().await;
-        if let Some(scoped_owner) = request_owner() {
-            if owner != scoped_owner {
-                return Err(fail(format!(
-                    "this MCP connection may only claim owner '{scoped_owner}'"
-                )));
-            }
-        }
+        enforce_scoped_owner(owner, "claim")?;
         if !st.pages.contains_key(&a.page) {
             return Err(fail(format!("unknown page '{}'", a.page)));
         }
@@ -1756,18 +1826,25 @@ impl BrowserServer {
         Ok(ok(format!("owner {owner} claimed {}", a.page)))
     }
 
-    /// Release an owner's page claim without closing the tab.
-    #[tool(description = "Release an owner's page claim without closing the page")]
+    /// Release an owner's primary alias without closing the tab. On an
+    /// owner-scoped HTTP connection, durable page ownership remains in place
+    /// so another owner cannot take over a guessed page id.
+    #[tool(
+        description = "Release the owner's primary page alias without closing the page; owner-scoped connections retain durable page ownership for isolation"
+    )]
     async fn browser_release_page(
         &self,
         Parameters(a): Parameters<OwnerArg>,
     ) -> Result<CallToolResult, McpError> {
+        enforce_scoped_owner(&a.owner, "release")?;
+        let preserve_durable_owner = request_owner().is_some();
         let mut st = self.state.lock().await;
-        match st.owners.remove(&a.owner) {
-            Some(page) => {
-                st.page_owners.retain(|_, owner| owner != &a.owner);
-                Ok(ok(format!("released owner {} from {page}", a.owner)))
-            }
+        match release_owner_claim(&mut st, &a.owner, preserve_durable_owner) {
+            Some(page) if preserve_durable_owner => Ok(ok(format!(
+                "released primary alias {} from {page}; durable page ownership retained",
+                a.owner
+            ))),
+            Some(page) => Ok(ok(format!("released owner {} from {page}", a.owner))),
             None => Err(fail(format!("unknown owner '{}'", a.owner))),
         }
     }
@@ -1925,18 +2002,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cli = parse_cli();
+    let cli = parse_cli()?;
+    if cli.version {
+        println!("browser-rs {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if cli.help {
         print!("{USAGE}");
         return Ok(());
     }
 
     // HTTP mode if --port (or AB_HTTP) is given; otherwise stdio.
-    let port = cli.port.or_else(|| {
-        std::env::var("AB_HTTP")
-            .ok()
-            .and_then(|v| v.split(':').next_back()?.parse().ok())
-    });
+    let env_port = std::env::var("AB_HTTP")
+        .ok()
+        .map(|value| parse_port(value.split(':').next_back().unwrap_or_default(), "AB_HTTP"))
+        .transpose()?;
+    let port = cli.port.or(env_port);
     if let Some(port) = port {
         return serve_http(&format!("{}:{}", cli.host, port)).await;
     }
@@ -1962,54 +2043,190 @@ Options:\n\
   --connect <port|url>     Attach to a Chrome already running with\n\
                            --remote-debugging-port (identical fingerprint)\n\
   -h, --help               Show this help\n\
+  -V, --version            Show the browser-rs version\n\
 \n\
-Env equivalents: AB_HTTP, AB_PROFILE, AB_HEADLESS, AB_STEALTH, AB_CONNECT, AB_CHROME.\n";
+Env equivalents: AB_HTTP, AB_HTTP_CAPABILITY, AB_PROFILE, AB_HEADLESS, AB_STEALTH, AB_CONNECT, AB_CHROME.\n";
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bind_address_is_loopback, constant_time_secret_eq, enforce_scoped_owner, parse_cli_from,
+        parse_connect_port, release_owner_claim, webauthn_options_match_automatic_defaults, State,
+        REQUEST_OWNER,
+    };
+
+    #[test]
+    fn capability_comparison_requires_an_exact_match() {
+        assert!(constant_time_secret_eq("한국어-token", "한국어-token"));
+        assert!(!constant_time_secret_eq("한국어-token", "other-token"));
+        assert!(!constant_time_secret_eq("short", "longer"));
+    }
+
+    #[tokio::test]
+    async fn owner_mutations_are_pinned_to_the_request_scope() {
+        REQUEST_OWNER
+            .scope(Some("한국어-owner".to_string()), async {
+                assert!(enforce_scoped_owner("한국어-owner", "release").is_ok());
+                assert!(enforce_scoped_owner("other-owner", "release").is_err());
+            })
+            .await;
+    }
+
+    #[test]
+    fn scoped_release_preserves_durable_page_ownership() {
+        let mut state = State::default();
+        state.owners.insert("owner-a".into(), "p1".into());
+        state.page_owners.insert("p1".into(), "owner-a".into());
+
+        assert_eq!(
+            release_owner_claim(&mut state, "owner-a", true),
+            Some("p1".into())
+        );
+        assert!(!state.owners.contains_key("owner-a"));
+        assert_eq!(
+            state.page_owners.get("p1").map(String::as_str),
+            Some("owner-a")
+        );
+    }
+
+    #[test]
+    fn cli_parser_accepts_split_and_inline_values() {
+        let cli = parse_cli_from(
+            ["--port=9321", "--host", "127.0.0.1"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(cli.port, Some(9321));
+        assert_eq!(cli.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn cli_parser_rejects_missing_invalid_and_unknown_options() {
+        for args in [vec!["--port"], vec!["--port", "0"], vec!["--porrt", "9321"]] {
+            assert!(parse_cli_from(args.into_iter().map(str::to_string)).is_err());
+        }
+    }
+
+    #[test]
+    fn connect_parser_requires_an_explicit_valid_port() {
+        assert_eq!(parse_connect_port("9222").unwrap(), 9222);
+        assert_eq!(parse_connect_port("http://127.0.0.1:9222").unwrap(), 9222);
+        assert!(parse_connect_port("http://127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn loopback_detection_does_not_trust_hostname_prefixes() {
+        assert!(bind_address_is_loopback("127.0.0.1:9321"));
+        assert!(bind_address_is_loopback("[::1]:9321"));
+        assert!(bind_address_is_loopback("localhost:9321"));
+        assert!(!bind_address_is_loopback("127.example.com:9321"));
+        assert!(!bind_address_is_loopback("0.0.0.0:9321"));
+    }
+
+    #[test]
+    fn automatic_webauthn_options_are_not_silently_reconfigured() {
+        assert!(webauthn_options_match_automatic_defaults(
+            "internal", true, true
+        ));
+        assert!(!webauthn_options_match_automatic_defaults(
+            "usb", true, true
+        ));
+        assert!(!webauthn_options_match_automatic_defaults(
+            "internal", false, true
+        ));
+        assert!(!webauthn_options_match_automatic_defaults(
+            "internal", true, false
+        ));
+    }
+}
 
 struct Cli {
     port: Option<u16>,
     host: String,
     help: bool,
+    version: bool,
 }
 
 /// Parse patchright-style CLI flags, mapping them onto the AB_* env vars that
 /// `make_browser` reads. This makes browser-rs a drop-in for hosts that
 /// allocate a port + profile and spawn the server (like clawgram does for
 /// playwright): `browser-rs --port N --user-data-dir <dir> --headless`.
-fn parse_cli() -> Cli {
+fn parse_port(value: &str, source: &str) -> anyhow::Result<u16> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid {source} port: {value:?}"))?;
+    if port == 0 {
+        anyhow::bail!("invalid {source} port: 0");
+    }
+    Ok(port)
+}
+
+fn parse_connect_port(value: &str) -> anyhow::Result<u16> {
+    if !value.contains("://") {
+        return parse_port(value, "--connect");
+    }
+    let endpoint = url::Url::parse(value)
+        .map_err(|error| anyhow::anyhow!("invalid --connect URL {value:?}: {error}"))?;
+    endpoint
+        .port()
+        .ok_or_else(|| anyhow::anyhow!("--connect URL must include an explicit port: {value:?}"))
+}
+
+fn parse_cli() -> anyhow::Result<Cli> {
+    parse_cli_from(std::env::args().skip(1))
+}
+
+fn option_value(
+    it: &mut impl Iterator<Item = String>,
+    inline_value: Option<&str>,
+    flag: &str,
+) -> anyhow::Result<String> {
+    inline_value
+        .map(str::to_string)
+        .or_else(|| it.next())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))
+}
+
+fn parse_cli_from(args: impl IntoIterator<Item = String>) -> anyhow::Result<Cli> {
     let mut c = Cli {
         port: None,
         host: "127.0.0.1".to_string(),
         help: false,
+        version: false,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(a) = it.next() {
-        match a.as_str() {
-            "--port" => c.port = it.next().and_then(|v| v.parse().ok()),
+        let (flag, inline_value) = a
+            .split_once('=')
+            .map_or((a.as_str(), None), |(flag, value)| (flag, Some(value)));
+        match flag {
+            "--port" => {
+                c.port = Some(parse_port(
+                    &option_value(&mut it, inline_value, flag)?,
+                    "--port",
+                )?)
+            }
             "--host" => {
-                if let Some(h) = it.next() {
-                    c.host = h;
-                }
+                c.host = option_value(&mut it, inline_value, flag)?;
             }
             "--user-data-dir" | "--profile" => {
-                if let Some(p) = it.next() {
-                    std::env::set_var("AB_PROFILE", p);
-                }
+                std::env::set_var("AB_PROFILE", option_value(&mut it, inline_value, flag)?);
             }
-            "--headless" => std::env::set_var("AB_HEADLESS", "1"),
-            "--headed" => std::env::remove_var("AB_HEADLESS"),
-            "--stealth" => std::env::set_var("AB_STEALTH", "1"),
+            "--headless" if inline_value.is_none() => std::env::set_var("AB_HEADLESS", "1"),
+            "--headed" if inline_value.is_none() => std::env::remove_var("AB_HEADLESS"),
+            "--stealth" if inline_value.is_none() => std::env::set_var("AB_STEALTH", "1"),
             "--connect" | "--cdp-endpoint" => {
-                if let Some(v) = it.next() {
-                    // Accept "9222" or "http://host:9222" → keep the port.
-                    let port = v.rsplit(':').next().unwrap_or(&v).trim_end_matches('/');
-                    std::env::set_var("AB_CONNECT", port);
-                }
+                let port = parse_connect_port(&option_value(&mut it, inline_value, flag)?)?;
+                std::env::set_var("AB_CONNECT", port.to_string());
             }
-            "-h" | "--help" => c.help = true,
-            _ => {}
+            "-h" | "--help" if inline_value.is_none() => c.help = true,
+            "-V" | "--version" if inline_value.is_none() => c.version = true,
+            _ => anyhow::bail!("unknown option: {a}"),
         }
     }
-    c
+    Ok(c)
 }
 
 // --- Legacy SSE transport (`/sse` + `/message`) ------------------------------
@@ -2187,6 +2404,56 @@ async fn close_owner_pages(
     )
 }
 
+fn constant_time_secret_eq(provided: &str, expected: &str) -> bool {
+    if provided.len() != expected.len() {
+        return false;
+    }
+    provided
+        .as_bytes()
+        .iter()
+        .zip(expected.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn bind_address_is_loopback(bind: &str) -> bool {
+    let Some((host, _port)) = bind.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+async fn require_http_capability(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+    expected: Arc<Option<String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let Some(expected) = expected.as_deref() else {
+        return next.run(request).await;
+    };
+    let authorized = request
+        .headers()
+        .get("x-browser-capability")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|provided| constant_time_secret_eq(provided, expected));
+    if authorized {
+        return next.run(request).await;
+    }
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({ "ok": false, "error": "invalid browser capability" })),
+    )
+        .into_response()
+}
+
 async fn serve_http(addr: &str) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -2218,12 +2485,33 @@ async fn serve_http(addr: &str) -> anyhow::Result<()> {
         browser: shared_state,
     };
 
+    // Optional for standalone compatibility; hosts such as Negotium set a
+    // fresh process-local token so the loopback backend cannot be bypassed by
+    // another local process that discovers its random port.
+    let configured_http_capability = std::env::var("AB_HTTP_CAPABILITY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    // Do not leak the server credential into Chrome and its renderer children.
+    std::env::remove_var("AB_HTTP_CAPABILITY");
+    let is_loopback = bind_address_is_loopback(&bind);
+    if configured_http_capability.is_none() && !is_loopback {
+        anyhow::bail!("AB_HTTP_CAPABILITY is required when binding outside loopback");
+    }
+    let http_capability = Arc::new(configured_http_capability);
+    let auth_capability = http_capability.clone();
+    let auth_layer = axum::middleware::from_fn(move |request, next| {
+        let expected = auth_capability.clone();
+        async move { require_http_capability(request, next, expected).await }
+    });
+
     let router = axum::Router::new()
         .route("/sse", axum::routing::get(sse_get))
         .route("/message", axum::routing::post(sse_post))
         .route("/owners", axum::routing::delete(close_owner_pages))
         .nest_service("/mcp", service)
-        .with_state(sse_state);
+        .with_state(sse_state)
+        .layer(auth_layer);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     info!("browser-rs MCP server on http://{bind}/mcp (streamable HTTP) + http://{bind}/sse (legacy SSE)");
